@@ -13,7 +13,7 @@ name = "client"
 path = "src/client.rs"
 
 [dependencies]
-blake2 = "0.10.6"
+blake3 = "1.5.5"
 futures = "0.3.31"
 log = "0.4.22"
 netdev = "0.31.0"

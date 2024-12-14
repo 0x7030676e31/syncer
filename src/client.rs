@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::io::Read;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,7 +16,7 @@ mod common;
 // TODO: Make it more configurable in the future
 const IMAGE_EXT: [&str; 6] = ["jpg", "jpeg", "png", "gif", "bmp", "webp"];
 const VIDEO_EXT: [&str; 8] = ["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v"];
-const _DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
+const CHUNK_SIZE: usize = 1024 * 1024;
 
 async fn join_all_ok<T, E>(
     futures: impl IntoIterator<Item = impl future::Future<Output = Result<T, E>>>,
@@ -265,7 +266,117 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
 }
 
 async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Result<()> {
-    println!("Fetching from {}", addr);
+    let mut buffer = [0; CHUNK_SIZE];
+    let mut queue = VecDeque::new();
+
+    let root = match get_fs_root() {
+        Ok(root) => root,
+        Err(err) => {
+            log::error!("Failed to get filesystem root: {}", err);
+            return Err(err);
+        }
+    };
+
+    queue.push_back(root);
+    while let Some(path) = queue.pop_front() {
+        let mut entries = match fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(err) => {
+                log::warn!("Failed to read directory {}: {}", path.display(), err);
+                continue;
+            }
+        };
+
+        while let Some(entry) = entries.next() {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    log::warn!("Failed to read directory entry: {}", err);
+                    continue;
+                }
+            };
+
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(err) => {
+                    log::error!(
+                        "Failed to read metadata for {}: {}",
+                        entry.path().display(),
+                        err
+                    );
+                    continue;
+                }
+            };
+
+            if metadata.is_symlink() {
+                continue;
+            }
+
+            let path = entry.path();
+            if metadata.is_dir() {
+                queue.push_back(path);
+                continue;
+            }
+
+            let ext = match path.extension() {
+                Some(ext) => ext,
+                None => continue,
+            };
+
+            let ext = match ext.to_str() {
+                Some(ext) => ext,
+                None => {
+                    log::error!("Failed to convert extension to string");
+                    continue;
+                }
+            };
+
+            if !IMAGE_EXT.contains(&ext) && !VIDEO_EXT.contains(&ext) {
+                continue;
+            }
+
+            let size = metadata.len();
+            socket.write_u64(size).await?;
+
+            let path = path.to_string_lossy().to_string();
+            let path_len = path.len() as u16;
+
+            socket.write_u16(path_len).await?;
+            socket.write_all(path.as_bytes()).await?;
+
+            let mut file = match fs::File::open(&path) {
+                Ok(file) => file,
+                Err(err) => {
+                    log::error!("Failed to open file {}: {}", path, err);
+                    continue;
+                }
+            };
+
+            let mut hasher = blake3::Hasher::new();
+            let mut total_read = 0;
+
+            loop {
+                let to_read = CHUNK_SIZE.min((size - total_read) as usize);
+                if to_read == 0 {
+                    break;
+                }
+
+                match file.read_exact(&mut buffer[..to_read]) {
+                    Ok(_) => {}
+                    Err(err) => {
+                        log::error!("Failed to read file {}: {}", path, err);
+                        break;
+                    }
+                };
+
+                total_read += to_read as u64;
+                socket.write_all(&buffer[..to_read]).await?;
+                hasher.update(&buffer[..to_read]);
+            }
+
+            let _hash = hasher.finalize();
+        }
+    }
 
     match cleanup(socket, addr).await {
         Ok(_) => Ok(()),
