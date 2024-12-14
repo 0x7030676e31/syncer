@@ -26,7 +26,7 @@ jobs:
 
       - name: Get latest commit hash
         id: vars
-        run: echo "commit_hash=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+        run: echo "commit_hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Build client binary
         run: cargo build --release --bin client
@@ -63,7 +63,7 @@ jobs:
 
       - name: Get latest commit hash
         id: vars
-        run: echo "commit_hash=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+        run: echo "commit_hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Build client binary
         run: cargo build --release --bin client
@@ -103,7 +103,7 @@ jobs:
 
       - name: Get latest commit hash
         id: vars
-        run: echo "commit_hash=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+        run: echo "commit_hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
