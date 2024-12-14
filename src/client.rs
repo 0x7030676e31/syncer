@@ -12,6 +12,11 @@ use tokio::time;
 
 mod common;
 
+// TODO: Make it more configurable in the future
+const IMAGE_EXT: [&str; 6] = ["jpg", "jpeg", "png", "gif", "bmp", "webp"];
+const VIDEO_EXT: [&str; 8] = ["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v"];
+const _DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
+
 async fn join_all_ok<T, E>(
     futures: impl IntoIterator<Item = impl future::Future<Output = Result<T, E>>>,
 ) -> Option<T> {
@@ -165,7 +170,7 @@ async fn main() {
 }
 
 async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Result<()> {
-    let mut files: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut extensions: HashMap<String, (u64, u64)> = HashMap::new();
     let mut queue = VecDeque::new();
 
     let root = match get_fs_root() {
@@ -181,7 +186,7 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
         let mut entries = match fs::read_dir(&path) {
             Ok(entries) => entries,
             Err(err) => {
-                log::error!("Failed to read directory {}: {}", path.display(), err);
+                log::warn!("Failed to read directory {}: {}", path.display(), err);
                 continue;
             }
         };
@@ -190,7 +195,7 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(err) => {
-                    log::error!("Failed to read directory entry: {}", err);
+                    log::warn!("Failed to read directory entry: {}", err);
                     continue;
                 }
             };
@@ -230,17 +235,17 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
                 }
             };
 
-            if !common::IMAGE_EXT.contains(&ext) && !common::VIDEO_EXT.contains(&ext) {
+            if !IMAGE_EXT.contains(&ext) && !VIDEO_EXT.contains(&ext) {
                 continue;
             }
 
-            let entry = files.entry(ext.to_string()).or_insert((0, 0));
+            let entry = extensions.entry(ext.to_string()).or_insert((0, 0));
             entry.0 += 1;
             entry.1 += metadata.len();
         }
     }
 
-    for (ext, (count, size)) in files {
+    for (ext, (count, size)) in extensions {
         let ext_len = ext.len() as u8;
         let ext = ext.as_bytes();
 

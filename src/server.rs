@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -61,6 +62,19 @@ fn prompt_output_path() {
     }
 
     let _ = TARGET_DIR.set(path);
+}
+
+fn storage_unit(bytes: u64) -> (f64, &'static str) {
+    let units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut unit = 0;
+    let mut bytes = bytes as f64;
+
+    while bytes >= 1024.0 {
+        bytes /= 1024.0;
+        unit += 1;
+    }
+
+    (bytes, units[unit])
 }
 
 #[tokio::main]
@@ -160,11 +174,149 @@ async fn handle_connection(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
 }
 
 async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Result<()> {
-    println!("Scanning...");
-    Ok(())
+    let mut extensions: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut ext_buf = [0; u8::MAX as usize];
+
+    loop {
+        let ext_length = match socket.read_u8().await {
+            Ok(ext_length) => ext_length,
+            Err(err) => {
+                log::error!("Failed to read extension length from {}: {}", addr, err);
+                return Err(err);
+            }
+        };
+
+        if ext_length == 0 {
+            break;
+        }
+
+        if let Err(err) = socket.read_exact(&mut ext_buf[..ext_length as usize]).await {
+            log::error!("Failed to read extension from {}: {}", addr, err);
+            return Err(err);
+        }
+
+        let ext = match String::from_utf8(ext_buf[..ext_length as usize].to_vec()) {
+            Ok(ext) => ext,
+            Err(err) => {
+                log::error!("Failed to parse extension from {}: {}", addr, err);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Invalid extension: {}", err),
+                ));
+            }
+        };
+
+        let count = match socket.read_u64().await {
+            Ok(count) => count,
+            Err(err) => {
+                log::error!("Failed to read count from {}: {}", addr, err);
+                return Err(err);
+            }
+        };
+
+        let size = match socket.read_u64().await {
+            Ok(size) => size,
+            Err(err) => {
+                log::error!("Failed to read size from {}: {}", addr, err);
+                return Err(err);
+            }
+        };
+
+        let entry = extensions.entry(ext).or_insert((0, 0));
+        entry.0 += count;
+        entry.1 += size;
+    }
+
+    log::info!("Scan completed for {}", addr);
+
+    let padding = extensions
+        .iter()
+        .fold((0, 0, 0), |acc, (ext, (count, size))| {
+            let (size, unit) = storage_unit(*size);
+
+            (
+                acc.0.max(ext.len()),
+                acc.1.max(count.to_string().len()),
+                acc.2.max(format!("{:.2} {}", size, unit).len()),
+            )
+        });
+
+    let (total_count, total_size) = extensions
+        .values()
+        .fold((0, 0), |acc, (count, size)| (acc.0 + count, acc.1 + size));
+
+    let (total_size, total_size_unit) = storage_unit(total_size);
+    let padding = (
+        padding.0.max("Extension".len()).max("Total".len()),
+        padding
+            .1
+            .max("Count".len())
+            .max(total_count.to_string().len()),
+        padding
+            .2
+            .max(format!("{:.2} {}", total_size, total_size_unit).len()),
+    );
+
+    print!(
+        "\n {:<padding0$} | {:<padding1$} | {:<padding2$}\n",
+        "Extension",
+        "Count",
+        "Size",
+        padding0 = padding.0,
+        padding1 = padding.1,
+        padding2 = padding.2
+    );
+
+    print!(
+        "-{:-<padding0$}---{:-<padding1$}---{:-<padding2$}-\n",
+        "",
+        "",
+        "",
+        padding0 = padding.0,
+        padding1 = padding.1,
+        padding2 = padding.2
+    );
+
+    let mut sorted = extensions.into_iter().collect::<Vec<_>>();
+    sorted.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+
+    print!(
+        " {:<padding0$} | {:<padding1$} | {:<padding2$}\n",
+        "Total",
+        total_count,
+        format!("{:.2} {}", total_size, total_size_unit),
+        padding0 = padding.0,
+        padding1 = padding.1,
+        padding2 = padding.2
+    );
+
+    for (ext, (count, size)) in sorted {
+        let (size, unit) = storage_unit(size);
+        print!(
+            " {:<padding0$} | {:<padding1$} | {:<padding2$}\n",
+            ext,
+            count,
+            format!("{:.2} {}", size, unit),
+            padding0 = padding.0,
+            padding1 = padding.1,
+            padding2 = padding.2
+        );
+    }
+
+    println!();
+    match socket.shutdown().await {
+        Ok(_) => {
+            log::debug!("Connection with {} shutdown", addr);
+            return Ok(());
+        }
+        Err(err) => {
+            log::error!("Failed to shutdown connection with {}: {}", addr, err);
+            return Err(err);
+        }
+    }
 }
 
-async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Result<()> {
+async fn handle_mode1_fetch(mut _socket: TcpStream, _addr: SocketAddr) -> io::Result<()> {
     println!("Fetching...");
     Ok(())
 }
