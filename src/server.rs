@@ -148,6 +148,11 @@ async fn handle_connection(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
     log::info!("Verified connection with {}", addr);
 
     let mode = SERVER_MODE.get().expect("mode not set");
+    if let Err(err) = socket.write_u8(mode.into()).await {
+        log::error!("Failed to send mode to {}: {}", addr, err);
+        return Err(err);
+    }
+
     match mode {
         common::Mode::Scan => handle_mode0_scan(socket, addr).await,
         common::Mode::Fetch => handle_mode1_fetch(socket, addr).await,

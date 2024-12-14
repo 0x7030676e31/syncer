@@ -54,6 +54,27 @@ impl Into<u8> for Mode {
     }
 }
 
+impl Into<u8> for &Mode {
+    fn into(self) -> u8 {
+        match self {
+            Mode::Scan => 0,
+            Mode::Fetch => 1,
+        }
+    }
+}
+
+impl TryFrom<u8> for Mode {
+    type Error = String;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Scan),
+            1 => Ok(Self::Fetch),
+            _ => Err(format!("Invalid mode value: {}", value)),
+        }
+    }
+}
+
 pub fn rust_log_init() {
     if env::var("RUST_LOG").is_err() {
         unsafe {
