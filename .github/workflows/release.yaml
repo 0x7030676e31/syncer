@@ -24,6 +24,10 @@ jobs:
           toolchain: nightly
           override: true
 
+      - name: Get latest commit hash
+        id: vars
+        run: echo "commit_hash=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
       - name: Build client binary
         run: cargo build --release --bin client
 
@@ -33,8 +37,8 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir release
-          cp target\release\client.exe release/client-windows.exe
-          cp target\release\server.exe release/server-windows.exe
+          cp target\release\client.exe release/client-windows-${{ steps.vars.outputs.commit_hash }}.exe
+          cp target\release\server.exe release/server-windows-${{ steps.vars.outputs.commit_hash }}.exe
 
       - name: Upload release assets
         uses: actions/upload-artifact@v3
@@ -57,6 +61,10 @@ jobs:
           toolchain: nightly
           override: true
 
+      - name: Get latest commit hash
+        id: vars
+        run: echo "commit_hash=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
       - name: Build client binary
         run: cargo build --release --bin client
 
@@ -66,8 +74,8 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir release
-          cp target/release/client release/client-linux
-          cp target/release/server release/server-linux
+          cp target/release/client release/client-linux-${{ steps.vars.outputs.commit_hash }}
+          cp target/release/server release/server-linux-${{ steps.vars.outputs.commit_hash }}
 
       - name: Upload release assets
         uses: actions/upload-artifact@v3
@@ -93,12 +101,16 @@ jobs:
           name: linux-binaries
           path: release
 
+      - name: Get latest commit hash
+        id: vars
+        run: echo "commit_hash=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
-            release/client-windows.exe
-            release/server-windows.exe
-            release/client-linux
-            release/server-linux
+            release/client-windows-${{ steps.vars.outputs.commit_hash }}.exe
+            release/server-windows-${{ steps.vars.outputs.commit_hash }}.exe
+            release/client-linux-${{ steps.vars.outputs.commit_hash }}
+            release/server-linux-${{ steps.vars.outputs.commit_hash }}
