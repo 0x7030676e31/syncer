@@ -1,4 +1,4 @@
-name: Build and Release Client Binary
+name: Build and Release Binaries
 
 on:
   push:
@@ -10,48 +10,60 @@ permissions:
 
 jobs:
   build:
-    name: Build Client Binary
-    runs-on: windows-latest
+    name: Build Binaries
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-    - name: Install Rust nightly toolchain
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: nightly
-        override: true
+      - name: Install Rust nightly toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
 
-    - name: Build client binary
-      run: cargo build --release --bin client
+      - name: Build client binary
+        run: cargo build --release --bin client
 
-    - name: Prepare release asset
-      run: |
-        mkdir release
-        cp target\release\client.exe release/
+      - name: Build server binary
+        run: cargo build --release --bin server
 
-    - name: Upload release asset
-      uses: actions/upload-artifact@v3
-      with:
-        name: client-binary
-        path: release/client.exe
+      - name: Rename and move binaries
+        run: |
+          mkdir release
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            mv target/release/client.exe release/client-windows.exe
+            mv target/release/server.exe release/server-windows.exe
+          else
+            mv target/release/client release/client-linux
+            mv target/release/server release/server-linux
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v3
+        with:
+          name: binaries
+          path: release/
 
   release:
-    name: Attach Binary to Release
+    name: Attach Binaries to Release
     needs: build
     runs-on: ubuntu-latest
 
     steps:
-    - name: Download built binary
-      uses: actions/download-artifact@v3
-      with:
-        name: client-binary
-        path: release
+      - name: Download built binaries
+        uses: actions/download-artifact@v3
+        with:
+          name: binaries
+          path: release
 
-    - name: Upload to release
-      uses: softprops/action-gh-release@v2
-      if: startsWith(github.ref, 'refs/tags/')
-      with:
-        files: release/client.exe
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: release/*
