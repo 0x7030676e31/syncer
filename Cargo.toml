@@ -19,8 +19,10 @@ log = "0.4.22"
 netdev = "0.31.0"
 pretty_env_logger = "0.5.0"
 tokio = { version = "1.42.0", features = [
-  "macros",
-  "rt-multi-thread",
-  "time",
-  "net",
+    "macros",
+    "rt-multi-thread",
+    "time",
+    "net",
+    "io-util",
+    "sync",
 ] }
