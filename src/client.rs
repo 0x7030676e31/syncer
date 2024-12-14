@@ -1,6 +1,8 @@
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::{env, future, io, process};
+use std::{env, fs, future, io, process};
 
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -83,6 +85,15 @@ async fn verify_host(host: String) -> io::Result<(TcpStream, common::Mode)> {
     Ok((socket, mode))
 }
 
+fn get_fs_root() -> io::Result<PathBuf> {
+    if !cfg!(windows) {
+        return Ok(PathBuf::from("/"));
+    }
+
+    let current_exe = env::current_exe()?;
+    Ok(current_exe.components().take(2).collect::<PathBuf>())
+}
+
 #[tokio::main]
 async fn main() {
     common::rust_log_init();
@@ -154,7 +165,90 @@ async fn main() {
 }
 
 async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Result<()> {
-    println!("Scanning {}", addr);
+    let mut files: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut queue = VecDeque::new();
+
+    let root = match get_fs_root() {
+        Ok(root) => root,
+        Err(err) => {
+            log::error!("Failed to get filesystem root: {}", err);
+            return Err(err);
+        }
+    };
+
+    queue.push_back(root);
+    while let Some(path) = queue.pop_front() {
+        let mut entries = match fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(err) => {
+                log::error!("Failed to read directory {}: {}", path.display(), err);
+                continue;
+            }
+        };
+
+        while let Some(entry) = entries.next() {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    log::error!("Failed to read directory entry: {}", err);
+                    continue;
+                }
+            };
+
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(err) => {
+                    log::error!(
+                        "Failed to read metadata for {}: {}",
+                        entry.path().display(),
+                        err
+                    );
+                    continue;
+                }
+            };
+
+            if metadata.is_symlink() {
+                continue;
+            }
+
+            let path = entry.path();
+            if metadata.is_dir() {
+                queue.push_back(path);
+                continue;
+            }
+
+            let ext = match path.extension() {
+                Some(ext) => ext,
+                None => continue,
+            };
+
+            let ext = match ext.to_str() {
+                Some(ext) => ext,
+                None => {
+                    log::error!("Failed to convert extension to string");
+                    continue;
+                }
+            };
+
+            if !common::IMAGE_EXT.contains(&ext) && !common::VIDEO_EXT.contains(&ext) {
+                continue;
+            }
+
+            let entry = files.entry(ext.to_string()).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += metadata.len();
+        }
+    }
+
+    for (ext, (count, size)) in files {
+        let ext_len = ext.len() as u8;
+        let ext = ext.as_bytes();
+
+        socket.write_u8(ext_len).await?;
+        socket.write_all(ext).await?;
+        socket.write_u64(count).await?;
+        socket.write_u64(size).await?;
+    }
 
     match cleanup(socket, addr).await {
         Ok(_) => Ok(()),

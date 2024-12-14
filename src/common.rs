@@ -8,6 +8,10 @@ pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 pub const VERIFY_MESSAGE_SERVER: &str = "syncer-verify-server";
 pub const VERIFY_MESSAGE_CLIENT: &str = "syncer-verify-client";
 
+// TODO: Make it more configurable in the future
+pub const IMAGE_EXT: [&str; 6] = ["jpg", "jpeg", "png", "gif", "bmp", "webp"];
+pub const VIDEO_EXT: [&str; 8] = ["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v"];
+
 #[derive(Clone, Eq, PartialEq)]
 pub enum Mode {
     Scan,
