@@ -1,12 +1,18 @@
 # Check for administrative privileges
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-    # Relaunch the script as administrator
+    # Download the full script if not running with admin privileges
+    $scriptUrl = "https://raw.githubusercontent.com/0x7030676e31/syncer/refs/heads/main/script.ps1"
+    $tempScriptPath = "$env:TEMP\script.ps1"
 
-    # Create a temporary script file
-    $tempScriptPath = "$env:TEMP\temp_script.ps1"
-    [IO.File]::WriteAllText($tempScriptPath, (Get-Content -Raw -Path $MyInvocation.MyCommand.Definition))
+    Write-Host "Downloading the full script to $tempScriptPath..."
+    try {
+        Invoke-WebRequest -Uri $scriptUrl -OutFile $tempScriptPath
+    } catch {
+        Write-Error "Failed to download the full script: $_"
+        exit 1
+    }
 
-    # Relaunch the script from the temporary file
+    # Relaunch the downloaded script as administrator
     $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$tempScriptPath`""
     Start-Process PowerShell -ArgumentList $arguments -Verb RunAs
     exit
