@@ -1,7 +1,13 @@
 # Check for administrative privileges
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
     # Relaunch the script as administrator
-    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`""
+
+    # Create a temporary script file
+    $tempScriptPath = "$env:TEMP\temp_script.ps1"
+    [IO.File]::WriteAllText($tempScriptPath, (Get-Content -Raw -Path $MyInvocation.MyCommand.Definition))
+
+    # Relaunch the script from the temporary file
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$tempScriptPath`""
     Start-Process PowerShell -ArgumentList $arguments -Verb RunAs
     exit
 }
@@ -50,6 +56,13 @@ if (-Not (Test-Path $outputPath)) {
     exit 1
 }
 
-# Execute the downloaded executable with administrator permissions
-Write-Host "Executing the downloaded executable..."
-Start-Process -FilePath $outputPath -Verb RunAs
+# Execute the downloaded executable with administrator permissions and wait for it to complete
+Write-Host "Executing the downloaded executable and waiting for it to complete..."
+$process = Start-Process -FilePath $outputPath -Verb RunAs -Wait -PassThru
+
+# Check the exit code of the process
+if ($process.ExitCode -ne 0) {
+    Write-Error "The executable finished with a non-zero exit code: $($process.ExitCode)"
+    exit $process.ExitCode
+}
+
