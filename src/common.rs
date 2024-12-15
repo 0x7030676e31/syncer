@@ -45,18 +45,18 @@ impl Mode {
     }
 }
 
-impl Into<u8> for Mode {
-    fn into(self) -> u8 {
-        match self {
-            Self::Scan => 0,
-            Self::Fetch => 1,
+impl From<Mode> for u8 {
+    fn from(mode: Mode) -> u8 {
+        match mode {
+            Mode::Scan => 0,
+            Mode::Fetch => 1,
         }
     }
 }
 
-impl Into<u8> for &Mode {
-    fn into(self) -> u8 {
-        match self {
+impl From<&Mode> for u8 {
+    fn from(mode: &Mode) -> u8 {
+        match mode {
             Mode::Scan => 0,
             Mode::Fetch => 1,
         }

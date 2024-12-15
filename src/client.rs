@@ -183,7 +183,7 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
 
     queue.push_back(root);
     while let Some(path) = queue.pop_front() {
-        let mut entries = match fs::read_dir(&path) {
+        let entries = match fs::read_dir(&path) {
             Ok(entries) => entries,
             Err(err) => {
                 log::warn!("Failed to read directory {}: {}", path.display(), err);
@@ -191,7 +191,7 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
             }
         };
 
-        while let Some(entry) = entries.next() {
+        for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(err) => {
@@ -203,7 +203,7 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
             let metadata = match entry.metadata() {
                 Ok(metadata) => metadata,
                 Err(err) => {
-                    log::error!(
+                    log::warn!(
                         "Failed to read metadata for {}: {}",
                         entry.path().display(),
                         err
@@ -278,7 +278,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
 
     queue.push_back(root);
     while let Some(path) = queue.pop_front() {
-        let mut entries = match fs::read_dir(&path) {
+        let entries = match fs::read_dir(&path) {
             Ok(entries) => entries,
             Err(err) => {
                 log::warn!("Failed to read directory {}: {}", path.display(), err);
@@ -286,7 +286,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
             }
         };
 
-        while let Some(entry) = entries.next() {
+        for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(err) => {

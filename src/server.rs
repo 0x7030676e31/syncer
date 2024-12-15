@@ -257,8 +257,8 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
             .max(format!("{:.2} {}", total_size, total_size_unit).len()),
     );
 
-    print!(
-        "\n {:<padding0$} | {:<padding1$} | {:<padding2$}\n",
+    println!(
+        "\n {:<padding0$} | {:<padding1$} | {:<padding2$}",
         "Extension",
         "Count",
         "Size",
@@ -267,8 +267,8 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
         padding2 = padding.2
     );
 
-    print!(
-        "-{:-<padding0$}---{:-<padding1$}---{:-<padding2$}-\n",
+    println!(
+        "-{:-<padding0$}---{:-<padding1$}---{:-<padding2$}-",
         "",
         "",
         "",
@@ -280,8 +280,8 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
     let mut sorted = extensions.into_iter().collect::<Vec<_>>();
     sorted.sort_by(|a, b| b.1.0.cmp(&a.1.0));
 
-    print!(
-        " {:<padding0$} | {:<padding1$} | {:<padding2$}\n",
+    println!(
+        " {:<padding0$} | {:<padding1$} | {:<padding2$}",
         "Total",
         total_count,
         format!("{:.2} {}", total_size, total_size_unit),
@@ -292,8 +292,8 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
 
     for (ext, (count, size)) in sorted {
         let (size, unit) = storage_unit(size);
-        print!(
-            " {:<padding0$} | {:<padding1$} | {:<padding2$}\n",
+        println!(
+            " {:<padding0$} | {:<padding1$} | {:<padding2$}",
             ext,
             count,
             format!("{:.2} {}", size, unit),
@@ -307,11 +307,11 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
     match socket.shutdown().await {
         Ok(_) => {
             log::debug!("Connection with {} shutdown", addr);
-            return Ok(());
+            Ok(())
         }
         Err(err) => {
             log::error!("Failed to shutdown connection with {}: {}", addr, err);
-            return Err(err);
+            Err(err)
         }
     }
 }
@@ -442,11 +442,11 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
     match socket.shutdown().await {
         Ok(_) => {
             log::debug!("Connection with {} shutdown", addr);
-            return Ok(());
+            Ok(())
         }
         Err(err) => {
             log::error!("Failed to shutdown connection with {}: {}", addr, err);
-            return Err(err);
+            Err(err)
         }
     }
 }
