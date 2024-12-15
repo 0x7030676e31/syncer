@@ -6,6 +6,7 @@ pub const DEFAULT_PORT: u16 = 2137;
 pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 pub const VERIFY_MESSAGE_SERVER: &str = "syncer-verify-server";
 pub const VERIFY_MESSAGE_CLIENT: &str = "syncer-verify-client";
+pub const CHUNK_SIZE: usize = 1024 * 32;
 
 #[derive(Clone, Eq, PartialEq)]
 pub enum Mode {

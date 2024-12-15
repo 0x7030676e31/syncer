@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 use std::str::FromStr;
 use std::sync::OnceLock;
-use std::{env, process};
+use std::{env, fs, process};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -316,7 +316,137 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
     }
 }
 
-async fn handle_mode1_fetch(mut _socket: TcpStream, _addr: SocketAddr) -> io::Result<()> {
-    println!("Fetching...");
-    Ok(())
+fn trim_root(path: PathBuf) -> PathBuf {
+    path.components()
+        .skip_while(|c| c == &Component::RootDir)
+        .collect()
+}
+
+async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Result<()> {
+    let mut buf = [0; common::CHUNK_SIZE];
+
+    loop {
+        let size = match socket.read_u64().await {
+            Ok(size) => size,
+            Err(err) => {
+                log::error!("Failed to read size from {}: {}", addr, err);
+                return Err(err);
+            }
+        };
+
+        if size == 0 {
+            break;
+        }
+
+        let path_len = match socket.read_u16().await {
+            Ok(path_len) => path_len,
+            Err(err) => {
+                log::error!("Failed to read path length from {}: {}", addr, err);
+                return Err(err);
+            }
+        };
+
+        let mut path_buf = vec![0; path_len as usize];
+        if let Err(err) = socket.read_exact(&mut path_buf).await {
+            log::error!("Failed to read path from {}: {}", addr, err);
+            return Err(err);
+        }
+
+        let path = match String::from_utf8(path_buf) {
+            Ok(path) => path,
+            Err(err) => {
+                log::error!("Failed to parse path from {}: {}", addr, err);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Invalid path: {}", err),
+                ));
+            }
+        };
+
+        let path = TARGET_DIR
+            .get()
+            .unwrap()
+            .join(trim_root(PathBuf::from(path)));
+
+        log::debug!("Receiving file {} from {}", path.display(), addr);
+        if let Err(err) = fs::create_dir_all(path.parent().unwrap()) {
+            log::error!("Failed to create directory for {}: {}", path.display(), err);
+            return Err(err);
+        }
+
+        let mut file = match fs::File::create(&path) {
+            Ok(file) => file,
+            Err(err) => {
+                log::error!("Failed to create file {}: {}", path.display(), err);
+                return Err(err);
+            }
+        };
+
+        let mut hasher = blake3::Hasher::new();
+        let mut total_read = 0;
+
+        loop {
+            let to_read = match socket.read_u64().await {
+                Ok(to_read) => to_read,
+                Err(err) => {
+                    log::error!("Failed to read chunk size from {}: {}", addr, err);
+                    return Err(err);
+                }
+            };
+
+            if to_read == 0 {
+                break;
+            }
+
+            if let Err(err) = socket.read_exact(&mut buf[..to_read as usize]).await {
+                log::error!("Failed to read chunk from {}: {}", addr, err);
+                return Err(err);
+            }
+
+            total_read += to_read;
+            hasher.update(&buf[..to_read as usize]);
+
+            if let Err(err) = file.write_all(&buf[..to_read as usize]) {
+                log::error!("Failed to write chunk to {}: {}", path.display(), err);
+                return Err(err);
+            }
+
+            if let Err(err) = socket.write_all(&[0]).await {
+                log::error!("Failed to send ack to {}: {}", addr, err);
+                return Err(err);
+            }
+
+            if total_read == size {
+                break;
+            }
+        }
+
+        if total_read != size {
+            log::error!("Size mismatch for {}", path.display());
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "size mismatch"));
+        }
+
+        let mut client_hash = [0; blake3::OUT_LEN];
+        if let Err(err) = socket.read_exact(&mut client_hash).await {
+            log::error!("Failed to read hash from {}: {}", addr, err);
+            return Err(err);
+        }
+
+        let hash = hasher.finalize();
+        if *hash.as_bytes() != client_hash {
+            log::error!("Hash mismatch for {}", path.display());
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "hash mismatch"));
+        }
+    }
+
+    match socket.shutdown().await {
+        Ok(_) => {
+            log::debug!("Connection with {} shutdown", addr);
+            return Ok(());
+        }
+        Err(err) => {
+            log::error!("Failed to shutdown connection with {}: {}", addr, err);
+            return Err(err);
+        }
+    }
 }

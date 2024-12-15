@@ -16,7 +16,6 @@ mod common;
 // TODO: Make it more configurable in the future
 const IMAGE_EXT: [&str; 6] = ["jpg", "jpeg", "png", "gif", "bmp", "webp"];
 const VIDEO_EXT: [&str; 8] = ["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v"];
-const CHUNK_SIZE: usize = 1024 * 1024;
 
 async fn join_all_ok<T, E>(
     futures: impl IntoIterator<Item = impl future::Future<Output = Result<T, E>>>,
@@ -266,7 +265,7 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
 }
 
 async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Result<()> {
-    let mut buffer = [0; CHUNK_SIZE];
+    let mut buffer = [0; common::CHUNK_SIZE];
     let mut queue = VecDeque::new();
 
     let root = match get_fs_root() {
@@ -356,7 +355,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
             let mut total_read = 0;
 
             loop {
-                let to_read = CHUNK_SIZE.min((size - total_read) as usize);
+                let to_read = common::CHUNK_SIZE.min((size - total_read) as usize);
                 if to_read == 0 {
                     break;
                 }
@@ -370,11 +369,21 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
                 };
 
                 total_read += to_read as u64;
+                socket.write_u64(to_read as u64).await?;
                 socket.write_all(&buffer[..to_read]).await?;
                 hasher.update(&buffer[..to_read]);
+
+                let mut ack = [0; 1];
+                socket.read_exact(&mut ack).await?;
+
+                if ack[0] != 0 {
+                    log::error!("Failed to read file {}: invalid ack", path);
+                    break;
+                }
             }
 
-            let _hash = hasher.finalize();
+            let hash = hasher.finalize();
+            socket.write_all(hash.as_bytes()).await?;
         }
     }
 
@@ -388,7 +397,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
 }
 
 async fn cleanup(mut socket: TcpStream, addr: SocketAddr) -> io::Result<()> {
-    socket.write_u8(0).await?;
+    socket.write_u64(0).await?;
     log::debug!("Connection with {} closed", addr);
     Ok(())
 }
