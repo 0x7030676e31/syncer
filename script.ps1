@@ -8,7 +8,7 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 
 # GitHub repository information
 $repoOwner = "0x7030676e31"
-$repoName = "filesystem"
+$repoName = "syncer"
 
 # GitHub API URL to fetch the latest release
 $apiUrl = "https://api.github.com/repos/$repoOwner/$repoName/releases/latest"
