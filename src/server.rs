@@ -159,6 +159,12 @@ async fn handle_connection(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid data"));
     }
 
+    let mode = SERVER_MODE.get().expect("mode not set");
+    if let Err(err) = socket.write_u8(mode.into()).await {
+        log::error!("Failed to send mode to {}: {}", addr, err);
+        return Err(err);
+    }
+
     let os = match socket.read_u8().await {
         Ok(os) => os,
         Err(err) => {
@@ -175,14 +181,8 @@ async fn handle_connection(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
     log::info!(
         "Verified connection with {} as {}",
         addr,
-        if os == 0 { "Linux" } else { "Windows" }
+        if os == 0 { "Windows" } else { "Linux" }
     );
-
-    let mode = SERVER_MODE.get().expect("mode not set");
-    if let Err(err) = socket.write_u8(mode.into()).await {
-        log::error!("Failed to send mode to {}: {}", addr, err);
-        return Err(err);
-    }
 
     match mode {
         common::Mode::Scan => handle_mode0_scan(socket, addr).await,
