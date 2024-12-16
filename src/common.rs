@@ -7,6 +7,8 @@ pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 pub const VERIFY_MESSAGE_SERVER: &str = "syncer-verify-server";
 pub const VERIFY_MESSAGE_CLIENT: &str = "syncer-verify-client";
 pub const CHUNK_SIZE: usize = 1024 * 32;
+pub const LINUX_ID: u8 = 0;
+pub const WINDOWS_ID: u8 = 1;
 
 #[derive(Clone, Eq, PartialEq)]
 pub enum Mode {

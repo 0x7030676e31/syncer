@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::SocketAddr;
-use std::path::{Component, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::OnceLock;
 use std::{env, fs, process};
@@ -159,7 +159,24 @@ async fn handle_connection(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid data"));
     }
 
-    log::info!("Verified connection with {}", addr);
+    let os = match socket.read_u8().await {
+        Ok(os) => os,
+        Err(err) => {
+            log::error!("Failed to read OS from {}: {}", addr, err);
+            return Err(err);
+        }
+    };
+
+    if os != common::LINUX_ID && os != common::WINDOWS_ID {
+        log::error!("Invalid OS from {}", addr);
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid data"));
+    }
+
+    log::info!(
+        "Verified connection with {} as {}",
+        addr,
+        if os == 0 { "Linux" } else { "Windows" }
+    );
 
     let mode = SERVER_MODE.get().expect("mode not set");
     if let Err(err) = socket.write_u8(mode.into()).await {
@@ -169,7 +186,7 @@ async fn handle_connection(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
 
     match mode {
         common::Mode::Scan => handle_mode0_scan(socket, addr).await,
-        common::Mode::Fetch => handle_mode1_fetch(socket, addr).await,
+        common::Mode::Fetch => handle_mode1_fetch(socket, addr, os).await,
     }
 }
 
@@ -316,13 +333,17 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
     }
 }
 
-fn trim_root(path: PathBuf) -> PathBuf {
-    path.components()
-        .skip_while(|c| c == &Component::RootDir)
-        .collect()
+fn trim_root_and_format(mut path: String, os: u8) -> PathBuf {
+    if cfg!(windows) && os == 0 {
+        path = path.replace("/", "\\");
+    } else if cfg!(unix) && os == 1 {
+        path = path.replace("\\", "/");
+    }
+
+    PathBuf::from(path.trim_start_matches(std::path::MAIN_SEPARATOR))
 }
 
-async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Result<()> {
+async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> io::Result<()> {
     let mut buf = [0; common::CHUNK_SIZE];
 
     loop {
@@ -366,7 +387,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
         let path = TARGET_DIR
             .get()
             .unwrap()
-            .join(trim_root(PathBuf::from(path)));
+            .join(trim_root_and_format(path, os));
 
         log::debug!("Receiving file {} from {}", path.display(), addr);
         if let Err(err) = fs::create_dir_all(path.parent().unwrap()) {

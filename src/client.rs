@@ -87,6 +87,12 @@ async fn verify_host(host: String) -> io::Result<(TcpStream, common::Mode)> {
         }
     };
 
+    if cfg!(windows) {
+        socket.write_u8(common::WINDOWS_ID).await?;
+    } else {
+        socket.write_u8(common::LINUX_ID).await?;
+    }
+
     Ok((socket, mode))
 }
 
