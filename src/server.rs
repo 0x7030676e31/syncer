@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::OnceLock;
@@ -77,6 +77,52 @@ fn storage_unit(bytes: u64) -> (f64, &'static str) {
     (bytes, units[unit])
 }
 
+// fn validate_host(host: &str) -> bool {}
+
+fn get_host() -> String {
+    let host = match env::var("HOST") {
+        Ok(host) => host,
+        Err(_) => {
+            log::debug!("HOST not set, using");
+            String::from("0.0.0.0")
+        }
+    };
+
+    match SocketAddrV4::from_str(&host) {
+        Ok(_) => return host,
+        Err(_) => {
+            log::debug!("Provided HOST is not a valid SocketAddrV4, trying with Ipv4Addr");
+        }
+    };
+
+    if let Err(err) = host.parse::<Ipv4Addr>() {
+        log::error!("Invalid HOST: {}", err);
+        process::exit(1);
+    }
+
+    let port = match env::var("PORT") {
+        Ok(port) => port,
+        Err(_) => {
+            log::debug!("PORT not set, using {}", common::DEFAULT_PORT);
+            common::DEFAULT_PORT.to_string()
+        }
+    };
+
+    match port.parse::<u16>() {
+        Ok(_) => {
+            log::debug!("PORT set to {}", port);
+            format!("{}:{}", host, port)
+        }
+        Err(_) => {
+            log::warn!(
+                "Invalid port, falling back to default ({})",
+                common::DEFAULT_PORT
+            );
+            format!("{}:{}", host, common::DEFAULT_PORT)
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     common::rust_log_init();
@@ -86,13 +132,7 @@ async fn main() {
         prompt_output_path();
     }
 
-    let port = env::var("PORT").unwrap_or(common::DEFAULT_PORT.to_string());
-    if port.parse::<u16>().is_err() {
-        eprintln!("Invalid port: {}", port);
-        process::exit(1);
-    }
-
-    let addr = format!("0.0.0.0:{}", port);
+    let addr = get_host();
     let listener = match TcpListener::bind(&addr).await {
         Ok(listener) => listener,
         Err(err) => {

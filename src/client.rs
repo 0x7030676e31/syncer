@@ -17,10 +17,13 @@ mod common;
 const IMAGE_EXT: [&str; 6] = ["jpg", "jpeg", "png", "gif", "bmp", "webp"];
 const VIDEO_EXT: [&str; 8] = ["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v"];
 
-async fn join_all_ok<T, E>(
+const DEFAULT_SCAN_LIMIT: usize = 32;
+
+async fn join_n_ok<T, E>(
     futures: impl IntoIterator<Item = impl future::Future<Output = Result<T, E>>>,
+    n: usize,
 ) -> Option<T> {
-    let semaphore = Arc::new(Semaphore::new(32));
+    let semaphore = Arc::new(Semaphore::new(n));
     let futures = futures.into_iter().map(|future| {
         let semaphore = semaphore.clone();
         async move {
@@ -30,6 +33,21 @@ async fn join_all_ok<T, E>(
     });
 
     let mut futures = futures.collect::<FuturesUnordered<_>>();
+    while let Some(result) = futures.next().await {
+        match result {
+            Ok(value) => return Some(value),
+            Err(_) => continue,
+        }
+    }
+
+    None
+}
+
+async fn join_all_ok<T, E>(
+    futures: impl IntoIterator<Item = impl future::Future<Output = Result<T, E>>>,
+) -> Option<T> {
+    let mut futures = futures.into_iter().collect::<FuturesUnordered<_>>();
+
     while let Some(result) = futures.next().await {
         match result {
             Ok(value) => return Some(value),
@@ -115,6 +133,19 @@ async fn main() {
         process::exit(1);
     }
 
+    let scan_limit = match env::var("SCAN_LIMIT") {
+        Ok(scan_limit) => scan_limit,
+        Err(_) => DEFAULT_SCAN_LIMIT.to_string(),
+    };
+
+    let scan_limit = match scan_limit.parse::<usize>() {
+        Ok(scan_limit) => scan_limit,
+        Err(_) => {
+            eprintln!("Invalid scan limit: {}", scan_limit);
+            process::exit(1);
+        }
+    };
+
     let interface = match netdev::get_default_interface() {
         Ok(interface) => interface,
         Err(err) => {
@@ -147,7 +178,13 @@ async fn main() {
         }
     }
 
-    let (socket, mode) = match join_all_ok(futures).await {
+    let scan_result = if futures.len() <= scan_limit || scan_limit == 0 {
+        join_all_ok(futures).await
+    } else {
+        join_n_ok(futures, scan_limit).await
+    };
+
+    let (socket, mode) = match scan_result {
         Some(socket) => socket,
         None => {
             log::error!("Failed to connect to any host");
