@@ -446,7 +446,7 @@ async fn prehash_chech(
     };
 
     let mut hasher = blake3::Hasher::new();
-    let mut buf = [0; common::PREHASH_CHUNK_SIZE];
+    let mut buf = vec![0; common::PREHASH_CHUNK_SIZE];
 
     loop {
         let read = file.read(&mut buf)?;

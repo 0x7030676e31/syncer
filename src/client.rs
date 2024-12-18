@@ -366,7 +366,7 @@ async fn prehash_check(
         return Ok(false);
     }
 
-    let mut buffer = [0; common::PREHASH_CHUNK_SIZE];
+    let mut buffer = vec![0; common::PREHASH_CHUNK_SIZE];
     let mut hasher = blake3::Hasher::new();
 
     loop {
