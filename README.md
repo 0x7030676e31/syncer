@@ -21,7 +21,41 @@ With specified port:
 ```bash
 # Default port is 2137
 PORT=8080 ./server
+PORT=8080 ./client
 ```
+
+With specified address:
+
+```bash
+# Default address is 0.0.0.0
+HOST=192.168.0.1 ./server
+HOST=192.168.0.1 ./client
+```
+
+With specified chunk size:
+
+```bash
+# Default chunk size is 1024 * 32 bytes
+CHUNK_SIZE=1024 ./server
+```
+
+Whether to use Blake3 pre-hashing.
+Note: This might delete files that haven't been fully transferred.
+
+```bash
+# Default is false (to use pre-hashing set `USE_PREHASH` to any value)
+USE_PREHASH=true ./server
+USE_PREHASH=1 ./server
+```
+
+(Client only) With specified host limit to scan at a time:
+
+```bash
+# Default is 32
+SCAN_LIMIT=64 ./client
+```
+
+```bash
 
 With specified mode:
 
@@ -33,10 +67,4 @@ With specified output directory
 
 ```bash
 ./server fetch /path/to/output
-```
-
-And finally, with all options:
-
-```bash
-PORT=8080 ./server fetch /path/to/output
 ```

@@ -1,9 +1,10 @@
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{env, fs, process};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -14,6 +15,10 @@ mod common;
 
 static SERVER_MODE: OnceLock<common::Mode> = OnceLock::new();
 static TARGET_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+const DEFAULT_CHUNK_SIZE: u64 = 1024 * 32;
+static CHUNK_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_CHUNK_SIZE as usize);
+static PREHASH: AtomicBool = AtomicBool::new(false);
 
 fn prompt_mode() -> common::Mode {
     let mode = env::args().nth(1).unwrap_or_else(|| {
@@ -77,8 +82,6 @@ fn storage_unit(bytes: u64) -> (f64, &'static str) {
     (bytes, units[unit])
 }
 
-// fn validate_host(host: &str) -> bool {}
-
 fn get_host() -> String {
     let host = match env::var("HOST") {
         Ok(host) => host,
@@ -132,6 +135,18 @@ async fn main() {
         prompt_output_path();
     }
 
+    if let Ok(chunk_size) = env::var("CHUNK_SIZE") {
+        if let Ok(chunk_size) = chunk_size.parse::<u64>() {
+            CHUNK_SIZE.store(chunk_size as usize, Ordering::Relaxed);
+        } else {
+            log::warn!("Invalid CHUNK_SIZE, using default ({})", DEFAULT_CHUNK_SIZE);
+        }
+    }
+
+    if env::var("USE_PREHASH").is_ok() {
+        PREHASH.store(true, Ordering::Relaxed);
+    }
+
     let addr = get_host();
     let listener = match TcpListener::bind(&addr).await {
         Ok(listener) => listener,
@@ -140,6 +155,9 @@ async fn main() {
             process::exit(1);
         }
     };
+
+    log::debug!("Chunk size: {}", CHUNK_SIZE.load(Ordering::Relaxed));
+    log::debug!("Prehash: {}", PREHASH.load(Ordering::Relaxed));
 
     log::info!(
         "Server started on {} in {} mode{}",
@@ -215,6 +233,23 @@ async fn handle_connection(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
 
     if os != common::LINUX_ID && os != common::WINDOWS_ID {
         log::error!("Invalid OS from {}", addr);
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid data"));
+    }
+
+    let version = env!("CARGO_PKG_VERSION");
+    socket.write_u8(version.len() as u8).await?;
+    socket.write_all(version.as_bytes()).await?;
+
+    let ack = match socket.read_u8().await {
+        Ok(ack) => ack,
+        Err(err) => {
+            log::error!("Failed to read ack from {}: {}", addr, err);
+            return Err(err);
+        }
+    };
+
+    if ack != 1 {
+        log::error!("Invalid ack from {}", addr);
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid data"));
     }
 
@@ -374,6 +409,13 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
 }
 
 fn trim_root_and_format(mut path: String, os: u8) -> PathBuf {
+    if os == common::WINDOWS_ID {
+        let idx = path.find(':');
+        if idx.is_some() {
+            path = path.split_off(idx.unwrap() + 1);
+        }
+    }
+
     if cfg!(windows) && os == 0 {
         path = path.replace("/", "\\");
     } else if cfg!(unix) && os == 1 {
@@ -383,8 +425,84 @@ fn trim_root_and_format(mut path: String, os: u8) -> PathBuf {
     PathBuf::from(path.trim_start_matches(std::path::MAIN_SEPARATOR))
 }
 
+async fn prehash_chech(
+    socket: &mut TcpStream,
+    path: &PathBuf,
+    addr: SocketAddr,
+) -> io::Result<bool> {
+    let exists = fs::metadata(path).is_ok();
+    socket.write_u8(if exists { 1 } else { 0 }).await?;
+
+    if !exists {
+        return Ok(false);
+    }
+
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) => {
+            log::error!("Failed to open file {}: {}", path.display(), err);
+            return Err(err);
+        }
+    };
+
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = [0; common::PREHASH_CHUNK_SIZE];
+
+    loop {
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+
+        hasher.update(&buf[..read]);
+    }
+
+    let mut client_hash = [0; blake3::OUT_LEN];
+    if let Err(err) = socket.read_exact(&mut client_hash).await {
+        log::error!("Failed to read hash from {}: {}", addr, err);
+        return Err(err);
+    }
+
+    let hash = hasher.finalize();
+    let hash_match = *hash.as_bytes() == client_hash;
+
+    socket.write_u8(if hash_match { 1 } else { 0 }).await?;
+    log::debug!(
+        "Prehash check for {} from {}: {}",
+        path.display(),
+        addr,
+        if hash_match { "OK" } else { "FAIL" }
+    );
+
+    drop(file);
+    if !hash_match {
+        fs::remove_file(path)?;
+    }
+
+    Ok(hash_match)
+}
+
 async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> io::Result<()> {
-    let mut buf = [0; common::CHUNK_SIZE];
+    let chunk_size = CHUNK_SIZE.load(Ordering::Relaxed);
+    let prehash = PREHASH.load(Ordering::Relaxed);
+
+    socket.write_u64(chunk_size as u64).await?;
+    socket.write_u8(if prehash { 1 } else { 0 }).await?;
+
+    let ack = match socket.read_u8().await {
+        Ok(ack) => ack,
+        Err(err) => {
+            log::error!("Failed to read ack from {}: {}", addr, err);
+            return Err(err);
+        }
+    };
+
+    if ack != 1 {
+        log::error!("Invalid ack from {}", addr);
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid data"));
+    }
+
+    let mut buf = vec![0; chunk_size];
 
     loop {
         let size = match socket.read_u64().await {
@@ -429,12 +547,18 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             .unwrap()
             .join(trim_root_and_format(path, os));
 
-        log::debug!("Receiving file {} from {}", path.display(), addr);
         if let Err(err) = fs::create_dir_all(path.parent().unwrap()) {
             log::error!("Failed to create directory for {}: {}", path.display(), err);
             return Err(err);
         }
 
+        if prehash {
+            if prehash_chech(&mut socket, &path, addr).await? {
+                continue;
+            }
+        }
+
+        log::debug!("Receiving file {} from {}", path.display(), addr);
         let mut file = match fs::File::create(&path) {
             Ok(file) => file,
             Err(err) => {

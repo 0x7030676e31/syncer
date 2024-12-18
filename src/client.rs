@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -89,7 +89,7 @@ async fn verify_host(host: String) -> io::Result<(TcpStream, common::Mode)> {
         return Err(err);
     }
 
-    let mode = match socket.read_u8().await {
+    let mode_numeric = match socket.read_u8().await {
         Ok(mode) => mode,
         Err(err) => {
             log::debug!("Failed to read mode from {}: {}", addr, err);
@@ -97,7 +97,7 @@ async fn verify_host(host: String) -> io::Result<(TcpStream, common::Mode)> {
         }
     };
 
-    let mode = match mode.try_into() {
+    let mode: common::Mode = match mode_numeric.try_into() {
         Ok(mode) => mode,
         Err(_) => {
             log::debug!("Invalid mode from {}", addr);
@@ -111,6 +111,48 @@ async fn verify_host(host: String) -> io::Result<(TcpStream, common::Mode)> {
         socket.write_u8(common::LINUX_ID).await?;
     }
 
+    let version_len = match socket.read_u8().await {
+        Ok(version_len) => version_len as usize,
+        Err(err) => {
+            log::debug!("Failed to read version length from {}: {}", addr, err);
+            return Err(err);
+        }
+    };
+
+    let mut version = vec![0; version_len];
+    socket.read_exact(&mut version).await.inspect_err(|err| {
+        log::debug!("Failed to read version from {}: {}", addr, err);
+    })?;
+
+    let version = match String::from_utf8(version) {
+        Ok(version) => version,
+        Err(err) => {
+            log::debug!("Failed to convert version to string from {}: {}", addr, err);
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+    };
+
+    log::debug!("Server at {} is running version {}", addr, version);
+    if env!("CARGO_PKG_VERSION") != version {
+        log::error!(
+            "Version mismatch ({}): client version {} != server version {}",
+            addr,
+            env!("CARGO_PKG_VERSION"),
+            version
+        );
+    }
+
+    socket.write_u8(1).await.inspect_err(|err| {
+        log::debug!("Failed to write ack to {}: {}", addr, err);
+    })?;
+
+    log::debug!(
+        "Connection with {} verified: mode {} ({}), version {}",
+        addr,
+        mode.to_string(),
+        mode_numeric,
+        version
+    );
     Ok((socket, mode))
 }
 
@@ -307,8 +349,77 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
     }
 }
 
+async fn prehash_check(
+    socket: &mut TcpStream,
+    file: &mut fs::File,
+    addr: SocketAddr,
+) -> io::Result<bool> {
+    let exists = match socket.read_u8().await {
+        Ok(exists) => exists != 0,
+        Err(err) => {
+            log::error!("Failed to read exists from {}: {}", addr, err);
+            return Err(err);
+        }
+    };
+
+    if !exists {
+        return Ok(false);
+    }
+
+    let mut buffer = [0; common::PREHASH_CHUNK_SIZE];
+    let mut hasher = blake3::Hasher::new();
+
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+
+        hasher.update(&buffer[..read]);
+    }
+
+    let hash = hasher.finalize();
+    socket.write_all(hash.as_bytes()).await?;
+
+    let hash_match = match socket.read_u8().await {
+        Ok(hash_match) => hash_match != 0,
+        Err(err) => {
+            log::error!("Failed to read hash match from {}: {}", addr, err);
+            return Err(err);
+        }
+    };
+
+    Ok(hash_match)
+}
+
 async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Result<()> {
-    let mut buffer = [0; common::CHUNK_SIZE];
+    let chunk_size = match socket.read_u64().await {
+        Ok(chunk_size) => chunk_size as usize,
+        Err(err) => {
+            log::error!("Failed to read chunk size from {}: {}", addr, err);
+            return Err(err);
+        }
+    };
+
+    let prehash = match socket.read_u8().await {
+        Ok(prehash) => prehash != 0,
+        Err(err) => {
+            log::error!("Failed to read prehash from {}: {}", addr, err);
+            return Err(err);
+        }
+    };
+
+    socket.write_u8(1).await.inspect_err(|err| {
+        log::error!("Failed to write ack to {}: {}", addr, err);
+    })?;
+
+    log::info!(
+        "Starting fetch job with chunk size {} and prehash {}",
+        chunk_size,
+        prehash
+    );
+
+    let mut buffer = vec![0; chunk_size];
     let mut queue = VecDeque::new();
 
     let root = match get_fs_root() {
@@ -394,11 +505,20 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
                 }
             };
 
+            if prehash {
+                let hash_match = prehash_check(&mut socket, &mut file, addr).await?;
+                if hash_match {
+                    continue;
+                }
+
+                file.seek(io::SeekFrom::Start(0))?;
+            }
+
             let mut hasher = blake3::Hasher::new();
             let mut total_read = 0;
 
             loop {
-                let to_read = common::CHUNK_SIZE.min((size - total_read) as usize);
+                let to_read = chunk_size.min((size - total_read) as usize);
                 if to_read == 0 {
                     break;
                 }
