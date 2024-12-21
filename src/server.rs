@@ -20,6 +20,7 @@ const DEFAULT_CHUNK_SIZE: u64 = 1024 * 32;
 static CHUNK_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_CHUNK_SIZE as usize);
 static PREHASH: AtomicBool = AtomicBool::new(false);
 static PREHASH_THRESHOLD: AtomicU64 = AtomicU64::new(1024 * 1024 * 32);
+static CHECKSUM: AtomicBool = AtomicBool::new(false);
 
 fn prompt_mode() -> common::Mode {
     let mode = env::args().nth(1).unwrap_or_else(|| {
@@ -159,6 +160,9 @@ async fn main() {
         }
     }
 
+    if env::var("CHECKSUM").is_ok() {
+        CHECKSUM.store(true, Ordering::Relaxed);
+    }
     let addr = get_host();
     let listener = match TcpListener::bind(&addr).await {
         Ok(listener) => listener,
@@ -174,6 +178,7 @@ async fn main() {
         "Prehash threshold: {}",
         PREHASH_THRESHOLD.load(Ordering::Relaxed)
     );
+    log::debug!("Checksum: {}", CHECKSUM.load(Ordering::Relaxed));
 
     log::info!(
         "Server started on {} in {} mode{}",
@@ -506,10 +511,12 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
     let chunk_size = CHUNK_SIZE.load(Ordering::Relaxed);
     let prehash = PREHASH.load(Ordering::Relaxed);
     let prehash_threshold = PREHASH_THRESHOLD.load(Ordering::Relaxed);
+    let do_checksum = CHECKSUM.load(Ordering::Relaxed);
 
     socket.write_u64(chunk_size as u64).await?;
     socket.write_u8(if prehash { 1 } else { 0 }).await?;
     socket.write_u64(prehash_threshold).await?;
+    socket.write_u8(if do_checksum { 1 } else { 0 }).await?;
 
     let mut stdout = io::stdout();
 
@@ -606,7 +613,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             }
         };
 
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = do_checksum.then(|| blake3::Hasher::new());
         let mut total_read = 0;
 
         loop {
@@ -621,7 +628,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             }
 
             total_read += to_read as u64;
-            hasher.update(&buf[..to_read]);
+            hasher.as_mut().map(|hasher| hasher.update(&buf[..to_read]));
 
             if let Err(err) = file.write_all(&buf[..to_read]) {
                 log::error!("Failed to write chunk to {}: {}", dest.display(), err);
@@ -642,16 +649,18 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             tokio::time::sleep(time::Duration::from_millis(100)).await;
         }
 
-        let mut client_hash = [0; blake3::OUT_LEN];
-        if let Err(err) = socket.read_exact(&mut client_hash).await {
-            log::error!("Failed to read hash from {}: {}", addr, err);
-            return Err(err);
-        }
+        if let Some(hasher) = &mut hasher {
+            let mut client_hash = [0; blake3::OUT_LEN];
+            if let Err(err) = socket.read_exact(&mut client_hash).await {
+                log::error!("Failed to read hash from {}: {}", addr, err);
+                return Err(err);
+            }
 
-        let hash = hasher.finalize();
-        if *hash.as_bytes() != client_hash {
-            log::error!("Hash mismatch for {}", dest.display());
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "hash mismatch"));
+            let hash = hasher.finalize();
+            if *hash.as_bytes() != client_hash {
+                log::error!("Hash mismatch for {}", dest.display());
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "hash mismatch"));
+            }
         }
 
         print!("\x1B[A\x1B[K");

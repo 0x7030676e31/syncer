@@ -55,7 +55,13 @@ With pre-hash threshold:
 PREHASH_THRESHOLD=1048576 ./server # 1024 * 1024 bytes
 ```
 
+Whether to do hash check to verify the integrity of the file:
+
 ```bash
+# Default is false (to use hash check set `CHECKSUM` to any value)
+CHECKSUM=true ./server
+CHECKSUM=1 ./server
+```
 
 With specified mode:
 

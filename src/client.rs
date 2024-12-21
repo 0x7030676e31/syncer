@@ -429,15 +429,24 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
         }
     };
 
+    let do_checksum = match socket.read_u8().await {
+        Ok(do_checksum) => do_checksum != 0,
+        Err(err) => {
+            log::error!("Failed to read checksum from {}: {}", addr, err);
+            return Err(err);
+        }
+    };
+
     socket.write_u8(1).await.inspect_err(|err| {
         log::error!("Failed to write ack to {}: {}", addr, err);
     })?;
 
     log::info!(
-        "Starting fetch job with chunk size {} and prehash {} (threshold {})",
+        "Starting fetch job with chunk size {}, prehash {} (threshold {}) and checksum {}",
         chunk_size,
         prehash,
-        prehash_threshold
+        prehash_threshold,
+        do_checksum
     );
 
     let mut buffer = vec![0; chunk_size];
@@ -535,7 +544,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
                 file.seek(io::SeekFrom::Start(0))?;
             }
 
-            let mut hasher = blake3::Hasher::new();
+            let mut hasher = do_checksum.then(|| blake3::Hasher::new());
             let mut total_read = 0;
 
             loop {
@@ -554,7 +563,9 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
 
                 total_read += to_read as u64;
                 socket.write_all(&buffer[..to_read]).await?;
-                hasher.update(&buffer[..to_read]);
+                hasher
+                    .as_mut()
+                    .map(|hasher| hasher.update(&buffer[..to_read]));
 
                 let mut ack = [0; 1];
                 socket.read_exact(&mut ack).await?;
@@ -565,8 +576,10 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
                 }
             }
 
-            let hash = hasher.finalize();
-            socket.write_all(hash.as_bytes()).await?;
+            if let Some(hasher) = hasher {
+                let hash = hasher.finalize();
+                socket.write_all(hash.as_bytes()).await?;
+            }
         }
     }
 
