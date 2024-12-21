@@ -558,7 +558,15 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             }
         }
 
-        log::debug!("Receiving file {} from {}", path.display(), addr);
+        let (f64_size, unit) = storage_unit(size);
+        log::info!(
+            "Receiving file {} from {} ({:.2} {})",
+            path.display(),
+            addr,
+            f64_size,
+            unit
+        );
+
         let mut file = match fs::File::create(&path) {
             Ok(file) => file,
             Err(err) => {
@@ -571,27 +579,20 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
         let mut total_read = 0;
 
         loop {
-            let to_read = match socket.read_u64().await {
-                Ok(to_read) => to_read,
-                Err(err) => {
-                    log::error!("Failed to read chunk size from {}: {}", addr, err);
-                    return Err(err);
-                }
-            };
-
+            let to_read = chunk_size.min((size - total_read) as usize);
             if to_read == 0 {
                 break;
             }
 
-            if let Err(err) = socket.read_exact(&mut buf[..to_read as usize]).await {
+            if let Err(err) = socket.read_exact(&mut buf[..to_read]).await {
                 log::error!("Failed to read chunk from {}: {}", addr, err);
                 return Err(err);
             }
 
-            total_read += to_read;
-            hasher.update(&buf[..to_read as usize]);
+            total_read += to_read as u64;
+            hasher.update(&buf[..to_read]);
 
-            if let Err(err) = file.write_all(&buf[..to_read as usize]) {
+            if let Err(err) = file.write_all(&buf[..to_read]) {
                 log::error!("Failed to write chunk to {}: {}", path.display(), err);
                 return Err(err);
             }
@@ -600,15 +601,6 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
                 log::error!("Failed to send ack to {}: {}", addr, err);
                 return Err(err);
             }
-
-            if total_read == size {
-                break;
-            }
-        }
-
-        if total_read != size {
-            log::error!("Size mismatch for {}", path.display());
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "size mismatch"));
         }
 
         let mut client_hash = [0; blake3::OUT_LEN];

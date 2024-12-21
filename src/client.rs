@@ -532,7 +532,6 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
                 };
 
                 total_read += to_read as u64;
-                socket.write_u64(to_read as u64).await?;
                 socket.write_all(&buffer[..to_read]).await?;
                 hasher.update(&buffer[..to_read]);
 
