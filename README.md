@@ -48,13 +48,6 @@ USE_PREHASH=true ./server
 USE_PREHASH=1 ./server
 ```
 
-(Client only) With specified host limit to scan at a time:
-
-```bash
-# Default is 32
-SCAN_LIMIT=64 ./client
-```
-
 ```bash
 
 With specified mode:
@@ -67,4 +60,13 @@ With specified output directory
 
 ```bash
 ./server fetch /path/to/output
+```
+
+## Running (client)
+
+With specified host limit to scan at a time:
+
+```bash
+# Default is 32
+SCAN_LIMIT=64 ./client
 ```

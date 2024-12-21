@@ -425,7 +425,7 @@ fn trim_root_and_format(mut path: String, os: u8) -> PathBuf {
     PathBuf::from(path.trim_start_matches(std::path::MAIN_SEPARATOR))
 }
 
-async fn prehash_chech(
+async fn prehash_check(
     socket: &mut TcpStream,
     path: &PathBuf,
     addr: SocketAddr,
@@ -489,6 +489,8 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
     socket.write_u64(chunk_size as u64).await?;
     socket.write_u8(if prehash { 1 } else { 0 }).await?;
 
+    let mut stdout = io::stdout();
+
     let ack = match socket.read_u8().await {
         Ok(ack) => ack,
         Err(err) => {
@@ -542,35 +544,41 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             }
         };
 
-        let path = TARGET_DIR
+        let dest = TARGET_DIR
             .get()
             .unwrap()
             .join(trim_root_and_format(path, os));
 
-        if let Err(err) = fs::create_dir_all(path.parent().unwrap()) {
-            log::error!("Failed to create directory for {}: {}", path.display(), err);
+        if let Err(err) = fs::create_dir_all(dest.parent().unwrap()) {
+            log::error!("Failed to create directory for {}: {}", dest.display(), err);
             return Err(err);
         }
 
         if prehash {
-            if prehash_chech(&mut socket, &path, addr).await? {
+            println!("Checking prehash for {}", dest.display());
+            let prehash_result = prehash_check(&mut socket, &dest, addr).await?;
+
+            print!("\x1B[A\x1B[K");
+            stdout.flush().expect("Failed to flush stdout");
+
+            if prehash_result {
+                log::info!("Prehash check passed for {}", dest.display());
                 continue;
             }
         }
 
         let (f64_size, unit) = storage_unit(size);
-        log::info!(
-            "Receiving file {} from {} ({:.2} {})",
-            path.display(),
-            addr,
+        println!(
+            "Downloading: 0B / {:.2}{} - {}",
             f64_size,
-            unit
+            unit,
+            dest.display()
         );
 
-        let mut file = match fs::File::create(&path) {
+        let mut file = match fs::File::create(&dest) {
             Ok(file) => file,
             Err(err) => {
-                log::error!("Failed to create file {}: {}", path.display(), err);
+                log::error!("Failed to create file {}: {}", dest.display(), err);
                 return Err(err);
             }
         };
@@ -593,7 +601,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             hasher.update(&buf[..to_read]);
 
             if let Err(err) = file.write_all(&buf[..to_read]) {
-                log::error!("Failed to write chunk to {}: {}", path.display(), err);
+                log::error!("Failed to write chunk to {}: {}", dest.display(), err);
                 return Err(err);
             }
 
@@ -601,6 +609,18 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
                 log::error!("Failed to send ack to {}: {}", addr, err);
                 return Err(err);
             }
+
+            let (f64_total_read, unit_total_read) = storage_unit(total_read);
+            println!(
+                "\x1B[A\x1B[KDownloading: {:.2}{} / {:.2}{} - {}",
+                f64_total_read,
+                unit_total_read,
+                f64_size,
+                unit,
+                dest.display()
+            );
+
+            tokio::time::sleep(time::Duration::from_millis(100)).await;
         }
 
         let mut client_hash = [0; blake3::OUT_LEN];
@@ -611,9 +631,14 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
 
         let hash = hasher.finalize();
         if *hash.as_bytes() != client_hash {
-            log::error!("Hash mismatch for {}", path.display());
+            log::error!("Hash mismatch for {}", dest.display());
             return Err(io::Error::new(io::ErrorKind::InvalidData, "hash mismatch"));
         }
+
+        print!("\x1B[A\x1B[K");
+        stdout.flush().expect("Failed to flush stdout");
+
+        log::info!("Downloaded {} from {}", dest.display(), addr);
     }
 
     match socket.shutdown().await {
