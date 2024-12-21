@@ -291,6 +291,7 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
     let mut ext_buf = [0; u8::MAX as usize];
 
     loop {
+        log::debug!("Reading extension length from {}", addr);
         let ext_length = match socket.read_u8().await {
             Ok(ext_length) => ext_length,
             Err(err) => {
@@ -300,9 +301,11 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
         };
 
         if ext_length == 0 {
+            log::debug!("Received end of scan from {}", addr);
             break;
         }
 
+        log::debug!("Reading extension ({} bytes) from {}", ext_length, addr);
         if let Err(err) = socket.read_exact(&mut ext_buf[..ext_length as usize]).await {
             log::error!("Failed to read extension from {}: {}", addr, err);
             return Err(err);
@@ -319,6 +322,7 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
             }
         };
 
+        log::debug!("Reading count from {}", addr);
         let count = match socket.read_u64().await {
             Ok(count) => count,
             Err(err) => {
@@ -327,6 +331,7 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
             }
         };
 
+        log::debug!("Reading size from {}", addr);
         let size = match socket.read_u64().await {
             Ok(size) => size,
             Err(err) => {
@@ -453,9 +458,17 @@ async fn prehash_check(
     addr: SocketAddr,
 ) -> io::Result<bool> {
     let exists = fs::metadata(path).is_ok();
+    log::debug!(
+        "Sending exists ({} - {}) to {}",
+        exists,
+        if exists { 1 } else { 0 },
+        addr
+    );
+
     socket.write_u8(if exists { 1 } else { 0 }).await?;
 
     if !exists {
+        log::debug!("File does not exist, skipping prehash check");
         return Ok(false);
     }
 
@@ -469,9 +482,18 @@ async fn prehash_check(
 
     let metadata = file.metadata()?;
     let is_size_equal = metadata.len() == size;
+
+    log::debug!(
+        "Sending size equal ({} - {}) to {}",
+        is_size_equal,
+        if is_size_equal { 1 } else { 0 },
+        addr
+    );
+
     socket.write_u8(if is_size_equal { 1 } else { 0 }).await?;
 
     if !is_size_equal {
+        log::debug!("File size does not match, skipping prehash check");
         fs::remove_file(path)?;
         return Ok(false);
     }
@@ -488,19 +510,29 @@ async fn prehash_check(
         hasher.update(&buf[..read]);
     }
 
+    log::debug!("Reading client hash from {}", addr);
     let mut client_hash = [0; blake3::OUT_LEN];
     if let Err(err) = socket.read_exact(&mut client_hash).await {
         log::error!("Failed to read hash from {}: {}", addr, err);
         return Err(err);
     }
 
-    let hash = hasher.finalize();
-    let hash_match = *hash.as_bytes() == client_hash;
+    let hash = *hasher.finalize().as_bytes();
+    log::debug!("Server hash: {:?}, Client hash: {:?}", hash, client_hash);
+
+    let hash_match = hash == client_hash;
+    log::debug!(
+        "Sending hash match ({} - {}) to {}",
+        hash_match,
+        if hash_match { 1 } else { 0 },
+        addr
+    );
 
     socket.write_u8(if hash_match { 1 } else { 0 }).await?;
     drop(file);
 
     if !hash_match {
+        log::error!("Hash mismatch for {}", path.display());
         fs::remove_file(path)?;
     }
 
@@ -513,6 +545,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
     let prehash_threshold = PREHASH_THRESHOLD.load(Ordering::Relaxed);
     let do_checksum = CHECKSUM.load(Ordering::Relaxed);
 
+    log::debug!("Sending config to {}", addr);
     socket.write_u64(chunk_size as u64).await?;
     socket.write_u8(if prehash { 1 } else { 0 }).await?;
     socket.write_u64(prehash_threshold).await?;
@@ -520,6 +553,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
 
     let mut stdout = io::stdout();
 
+    log::debug!("Reading ack from {}", addr);
     let ack = match socket.read_u8().await {
         Ok(ack) => ack,
         Err(err) => {
@@ -536,6 +570,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
     let mut buf = vec![0; chunk_size];
 
     loop {
+        log::debug!("Reading size from {}", addr);
         let size = match socket.read_u64().await {
             Ok(size) => size,
             Err(err) => {
@@ -545,9 +580,11 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
         };
 
         if size == 0 {
+            log::debug!("Received end of fetch from {}", addr);
             break;
         }
 
+        log::debug!("Reading path length from {}", addr);
         let path_len = match socket.read_u16().await {
             Ok(path_len) => path_len,
             Err(err) => {
@@ -556,6 +593,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             }
         };
 
+        log::debug!("Reading path ({} bytes) from {}", path_len, addr);
         let mut path_buf = vec![0; path_len as usize];
         if let Err(err) = socket.read_exact(&mut path_buf).await {
             log::error!("Failed to read path from {}: {}", addr, err);
@@ -573,11 +611,13 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             }
         };
 
+        log::debug!("Path: {}", path);
         let dest = TARGET_DIR
             .get()
             .unwrap()
             .join(trim_root_and_format(path.clone(), os));
 
+        log::debug!("Creating directory for {}", dest.display());
         if let Err(err) = fs::create_dir_all(dest.parent().unwrap()) {
             log::error!("Failed to create directory for {}: {}", dest.display(), err);
             return Err(err);
@@ -599,6 +639,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
         }
 
         if fs::metadata(&dest).is_ok() {
+            log::debug!("Removing existing file {}", dest.display());
             fs::remove_file(&dest)?;
         }
 
@@ -618,7 +659,10 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
 
         loop {
             let to_read = chunk_size.min((size - total_read) as usize);
+            log::debug!("Reading chunk ({} bytes) from {}", to_read, addr);
+
             if to_read == 0 {
+                log::debug!("End of file reached (0 bytes to read) from {}", addr);
                 break;
             }
 
@@ -635,7 +679,8 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
                 return Err(err);
             }
 
-            if let Err(err) = socket.write_all(&[0]).await {
+            log::debug!("Sending ack to {}", addr);
+            if let Err(err) = socket.write_u8(1).await {
                 log::error!("Failed to send ack to {}: {}", addr, err);
                 return Err(err);
             }
@@ -645,22 +690,25 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
                 "\x1B[A\x1B[KDownloading: {:.2}{} / {:.2}{} - {}",
                 f64_total_read, unit_total_read, f64_size, unit, path
             );
-
-            tokio::time::sleep(time::Duration::from_millis(100)).await;
         }
 
         if let Some(hasher) = &mut hasher {
+            log::debug!("Reading client hash from {}", addr);
             let mut client_hash = [0; blake3::OUT_LEN];
             if let Err(err) = socket.read_exact(&mut client_hash).await {
                 log::error!("Failed to read hash from {}: {}", addr, err);
                 return Err(err);
             }
 
-            let hash = hasher.finalize();
-            if *hash.as_bytes() != client_hash {
+            let hash = *hasher.finalize().as_bytes();
+            log::debug!("Server hash: {:?}, Client hash: {:?}", hash, client_hash);
+
+            if hash != client_hash {
                 log::error!("Hash mismatch for {}", dest.display());
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "hash mismatch"));
             }
+
+            log::info!("Hash match for {}", dest.display());
         }
 
         print!("\x1B[A\x1B[K");

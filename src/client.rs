@@ -196,6 +196,7 @@ async fn main() {
         }
     };
 
+    log::debug!("Default interface: {:?}", interface);
     if interface.ipv4.is_empty() {
         log::error!("No IPv4 address found on default interface");
         process::exit(1);
@@ -220,6 +221,7 @@ async fn main() {
         }
     }
 
+    log::debug!("Scanning {} hosts", futures.len());
     let scan_result = if futures.len() <= scan_limit || scan_limit == 0 {
         join_all_ok(futures).await
     } else {
@@ -268,6 +270,7 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
 
     queue.push_back(root);
     while let Some(path) = queue.pop_front() {
+        log::debug!("Scanning directory {}", path.display());
         let entries = match fs::read_dir(&path) {
             Ok(entries) => entries,
             Err(err) => {
@@ -298,11 +301,13 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
             };
 
             if metadata.is_symlink() {
+                log::debug!("Skipping symlink {}", entry.path().display());
                 continue;
             }
 
             let path = entry.path();
             if metadata.is_dir() {
+                log::debug!("Adding directory {} to queue", path.display());
                 queue.push_back(path);
                 continue;
             }
@@ -321,19 +326,28 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
             };
 
             if !IMAGE_EXT.contains(&ext) && !VIDEO_EXT.contains(&ext) {
+                log::debug!("Skipping non-image/video file {}", path.display());
                 continue;
             }
 
+            log::debug!("Found file {}", path.display());
             let entry = extensions.entry(ext.to_string()).or_insert((0, 0));
             entry.0 += 1;
             entry.1 += metadata.len();
         }
     }
 
+    log::debug!("Sending scan results to {}", addr);
     for (ext, (count, size)) in extensions {
         let ext_len = ext.len() as u8;
         let ext = ext.as_bytes();
 
+        log::debug!(
+            "Sending extension {:?} ({} files, {} bytes)",
+            ext,
+            count,
+            size
+        );
         socket.write_u8(ext_len).await?;
         socket.write_all(ext).await?;
         socket.write_u64(count).await?;
@@ -354,6 +368,7 @@ async fn prehash_check(
     file: &mut fs::File,
     addr: SocketAddr,
 ) -> io::Result<bool> {
+    log::debug!("Reading whether file exists from {}", addr);
     let exists = match socket.read_u8().await {
         Ok(exists) => exists != 0,
         Err(err) => {
@@ -363,9 +378,11 @@ async fn prehash_check(
     };
 
     if !exists {
+        log::debug!("File does not exist on {}", addr);
         return Ok(false);
     }
 
+    log::debug!("Reading whether file size matches from {}", addr);
     let size_match = match socket.read_u8().await {
         Ok(size_match) => size_match != 0,
         Err(err) => {
@@ -375,6 +392,7 @@ async fn prehash_check(
     };
 
     if !size_match {
+        log::debug!("File size does not match on {}", addr);
         return Ok(false);
     }
 
@@ -390,9 +408,12 @@ async fn prehash_check(
         hasher.update(&buffer[..read]);
     }
 
-    let hash = hasher.finalize();
-    socket.write_all(hash.as_bytes()).await?;
+    let hash = *hasher.finalize().as_bytes();
 
+    log::debug!("Sending hash {:?} to {}", hash, addr);
+    socket.write_all(&hash).await?;
+
+    log::debug!("Reading whether hash matches from {}", addr);
     let hash_match = match socket.read_u8().await {
         Ok(hash_match) => hash_match != 0,
         Err(err) => {
@@ -405,6 +426,7 @@ async fn prehash_check(
 }
 
 async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Result<()> {
+    log::debug!("Reading chunk size from {}", addr);
     let chunk_size = match socket.read_u64().await {
         Ok(chunk_size) => chunk_size as usize,
         Err(err) => {
@@ -413,6 +435,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
         }
     };
 
+    log::debug!("Chunk size: {}; reading prehash from {}", chunk_size, addr);
     let prehash = match socket.read_u8().await {
         Ok(prehash) => prehash != 0,
         Err(err) => {
@@ -421,6 +444,11 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
         }
     };
 
+    log::debug!(
+        "Prehash: {}; reading prehash threshold from {}",
+        prehash,
+        addr
+    );
     let prehash_threshold = match socket.read_u64().await {
         Ok(prehash_threshold) => prehash_threshold,
         Err(err) => {
@@ -429,6 +457,11 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
         }
     };
 
+    log::debug!(
+        "Prehash threshold: {}; reading checksum from {}",
+        prehash_threshold,
+        addr
+    );
     let do_checksum = match socket.read_u8().await {
         Ok(do_checksum) => do_checksum != 0,
         Err(err) => {
@@ -437,17 +470,10 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
         }
     };
 
+    log::debug!("Checksum: {}; sending ack to {}", do_checksum, addr);
     socket.write_u8(1).await.inspect_err(|err| {
         log::error!("Failed to write ack to {}: {}", addr, err);
     })?;
-
-    log::info!(
-        "Starting fetch job with chunk size {}, prehash {} (threshold {}) and checksum {}",
-        chunk_size,
-        prehash,
-        prehash_threshold,
-        do_checksum
-    );
 
     let mut buffer = vec![0; chunk_size];
     let mut queue = VecDeque::new();
@@ -462,6 +488,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
 
     queue.push_back(root);
     while let Some(path) = queue.pop_front() {
+        log::debug!("Reading directory {}", path.display());
         let entries = match fs::read_dir(&path) {
             Ok(entries) => entries,
             Err(err) => {
@@ -492,6 +519,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
             };
 
             if metadata.is_symlink() {
+                log::debug!("Skipping symlink {}", entry.path().display());
                 continue;
             }
 
@@ -518,13 +546,19 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
                 continue;
             }
 
+            log::debug!("Sending file {} to {}", path.display(), addr);
             let size = metadata.len();
+
+            log::debug!("Sending size {} to {}", size, addr);
             socket.write_u64(size).await?;
 
             let path = path.to_string_lossy().to_string();
             let path_len = path.len() as u16;
 
+            log::debug!("Sending path size {} to {}", path_len, addr);
             socket.write_u16(path_len).await?;
+
+            log::debug!("Sending path {} to {}", path, addr);
             socket.write_all(path.as_bytes()).await?;
 
             let mut file = match fs::File::open(&path) {
@@ -549,36 +583,46 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
 
             loop {
                 let to_read = chunk_size.min((size - total_read) as usize);
+                log::debug!("Reading {} bytes from {}", to_read, path);
+
                 if to_read == 0 {
+                    log::debug!("Finished reading file {}", path);
                     break;
                 }
 
-                match file.read_exact(&mut buffer[..to_read]) {
-                    Ok(_) => {}
-                    Err(err) => {
-                        log::error!("Failed to read file {}: {}", path, err);
-                        break;
-                    }
+                if let Err(err) = file.read_exact(&mut buffer[..to_read]) {
+                    log::error!("Failed to read file {}: {}", path, err);
+                    break;
                 };
 
                 total_read += to_read as u64;
+                log::debug!("Sending {} bytes to {}", to_read, addr);
+
                 socket.write_all(&buffer[..to_read]).await?;
                 hasher
                     .as_mut()
                     .map(|hasher| hasher.update(&buffer[..to_read]));
 
-                let mut ack = [0; 1];
-                socket.read_exact(&mut ack).await?;
+                log::debug!("Reading ack from {}", addr);
+                let ack = match socket.read_u8().await {
+                    Ok(ack) => ack,
+                    Err(err) => {
+                        log::error!("Failed to read ack from {}: {}", addr, err);
+                        break;
+                    }
+                };
 
-                if ack[0] != 0 {
+                if ack != 1 {
                     log::error!("Failed to read file {}: invalid ack", path);
                     break;
                 }
             }
 
             if let Some(hasher) = hasher {
-                let hash = hasher.finalize();
-                socket.write_all(hash.as_bytes()).await?;
+                let hash = *hasher.finalize().as_bytes();
+
+                log::debug!("Sending hash {:?} to {}", hash, addr);
+                socket.write_all(&hash).await?;
             }
         }
     }
