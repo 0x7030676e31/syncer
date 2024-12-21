@@ -366,6 +366,18 @@ async fn prehash_check(
         return Ok(false);
     }
 
+    let size_match = match socket.read_u8().await {
+        Ok(size_match) => size_match != 0,
+        Err(err) => {
+            log::error!("Failed to read size match from {}: {}", addr, err);
+            return Err(err);
+        }
+    };
+
+    if !size_match {
+        return Ok(false);
+    }
+
     let mut buffer = vec![0; common::PREHASH_CHUNK_SIZE];
     let mut hasher = blake3::Hasher::new();
 
@@ -409,14 +421,23 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
         }
     };
 
+    let prehash_threshold = match socket.read_u64().await {
+        Ok(prehash_threshold) => prehash_threshold,
+        Err(err) => {
+            log::error!("Failed to read prehash threshold from {}: {}", addr, err);
+            return Err(err);
+        }
+    };
+
     socket.write_u8(1).await.inspect_err(|err| {
         log::error!("Failed to write ack to {}: {}", addr, err);
     })?;
 
     log::info!(
-        "Starting fetch job with chunk size {} and prehash {}",
+        "Starting fetch job with chunk size {} and prehash {} (threshold {})",
         chunk_size,
-        prehash
+        prehash,
+        prehash_threshold
     );
 
     let mut buffer = vec![0; chunk_size];
@@ -505,7 +526,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
                 }
             };
 
-            if prehash {
+            if prehash && size >= prehash_threshold {
                 let hash_match = prehash_check(&mut socket, &mut file, addr).await?;
                 if hash_match {
                     continue;

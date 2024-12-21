@@ -48,6 +48,13 @@ USE_PREHASH=true ./server
 USE_PREHASH=1 ./server
 ```
 
+With pre-hash threshold:
+
+```bash
+# Default is 1024 * 1024 * 32 bytes
+PREHASH_THRESHOLD=1048576 ./server # 1024 * 1024 bytes
+```
+
 ```bash
 
 With specified mode:

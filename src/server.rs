@@ -4,7 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::{env, fs, process};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -19,6 +19,7 @@ static TARGET_DIR: OnceLock<PathBuf> = OnceLock::new();
 const DEFAULT_CHUNK_SIZE: u64 = 1024 * 32;
 static CHUNK_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_CHUNK_SIZE as usize);
 static PREHASH: AtomicBool = AtomicBool::new(false);
+static PREHASH_THRESHOLD: AtomicU64 = AtomicU64::new(1024 * 1024 * 32);
 
 fn prompt_mode() -> common::Mode {
     let mode = env::args().nth(1).unwrap_or_else(|| {
@@ -147,6 +148,17 @@ async fn main() {
         PREHASH.store(true, Ordering::Relaxed);
     }
 
+    if let Ok(prehash_threshold) = env::var("PREHASH_THRESHOLD") {
+        if let Ok(prehash_threshold) = prehash_threshold.parse::<u64>() {
+            PREHASH_THRESHOLD.store(prehash_threshold, Ordering::Relaxed);
+        } else {
+            log::warn!(
+                "Invalid PREHASH_THRESHOLD, using default ({})",
+                PREHASH_THRESHOLD.load(Ordering::Relaxed)
+            );
+        }
+    }
+
     let addr = get_host();
     let listener = match TcpListener::bind(&addr).await {
         Ok(listener) => listener,
@@ -158,6 +170,10 @@ async fn main() {
 
     log::debug!("Chunk size: {}", CHUNK_SIZE.load(Ordering::Relaxed));
     log::debug!("Prehash: {}", PREHASH.load(Ordering::Relaxed));
+    log::debug!(
+        "Prehash threshold: {}",
+        PREHASH_THRESHOLD.load(Ordering::Relaxed)
+    );
 
     log::info!(
         "Server started on {} in {} mode{}",
@@ -428,6 +444,7 @@ fn trim_root_and_format(mut path: String, os: u8) -> PathBuf {
 async fn prehash_check(
     socket: &mut TcpStream,
     path: &PathBuf,
+    size: u64,
     addr: SocketAddr,
 ) -> io::Result<bool> {
     let exists = fs::metadata(path).is_ok();
@@ -444,6 +461,15 @@ async fn prehash_check(
             return Err(err);
         }
     };
+
+    let metadata = file.metadata()?;
+    let is_size_equal = metadata.len() == size;
+    socket.write_u8(if is_size_equal { 1 } else { 0 }).await?;
+
+    if !is_size_equal {
+        fs::remove_file(path)?;
+        return Ok(false);
+    }
 
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0; common::PREHASH_CHUNK_SIZE];
@@ -467,14 +493,8 @@ async fn prehash_check(
     let hash_match = *hash.as_bytes() == client_hash;
 
     socket.write_u8(if hash_match { 1 } else { 0 }).await?;
-    log::debug!(
-        "Prehash check for {} from {}: {}",
-        path.display(),
-        addr,
-        if hash_match { "OK" } else { "FAIL" }
-    );
-
     drop(file);
+
     if !hash_match {
         fs::remove_file(path)?;
     }
@@ -485,9 +505,11 @@ async fn prehash_check(
 async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> io::Result<()> {
     let chunk_size = CHUNK_SIZE.load(Ordering::Relaxed);
     let prehash = PREHASH.load(Ordering::Relaxed);
+    let prehash_threshold = PREHASH_THRESHOLD.load(Ordering::Relaxed);
 
     socket.write_u64(chunk_size as u64).await?;
     socket.write_u8(if prehash { 1 } else { 0 }).await?;
+    socket.write_u64(prehash_threshold).await?;
 
     let mut stdout = io::stdout();
 
@@ -547,33 +569,34 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
         let dest = TARGET_DIR
             .get()
             .unwrap()
-            .join(trim_root_and_format(path, os));
+            .join(trim_root_and_format(path.clone(), os));
 
         if let Err(err) = fs::create_dir_all(dest.parent().unwrap()) {
             log::error!("Failed to create directory for {}: {}", dest.display(), err);
             return Err(err);
         }
 
-        if prehash {
-            println!("Checking prehash for {}", dest.display());
-            let prehash_result = prehash_check(&mut socket, &dest, addr).await?;
+        if prehash && size >= prehash_threshold {
+            println!("Checking prehash for {}", path);
+            stdout.flush().expect("Failed to flush stdout");
+
+            let prehash_result = prehash_check(&mut socket, &dest, size, addr).await?;
 
             print!("\x1B[A\x1B[K");
             stdout.flush().expect("Failed to flush stdout");
 
             if prehash_result {
-                log::info!("Prehash check passed for {}", dest.display());
+                log::info!("Prehash check passed for {}", path);
                 continue;
             }
         }
 
+        if fs::metadata(&dest).is_ok() {
+            fs::remove_file(&dest)?;
+        }
+
         let (f64_size, unit) = storage_unit(size);
-        println!(
-            "Downloading: 0B / {:.2}{} - {}",
-            f64_size,
-            unit,
-            dest.display()
-        );
+        println!("Downloading: 0B / {:.2}{} - {}", f64_size, unit, path);
 
         let mut file = match fs::File::create(&dest) {
             Ok(file) => file,
@@ -613,11 +636,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             let (f64_total_read, unit_total_read) = storage_unit(total_read);
             println!(
                 "\x1B[A\x1B[KDownloading: {:.2}{} / {:.2}{} - {}",
-                f64_total_read,
-                unit_total_read,
-                f64_size,
-                unit,
-                dest.display()
+                f64_total_read, unit_total_read, f64_size, unit, path
             );
 
             tokio::time::sleep(time::Duration::from_millis(100)).await;
@@ -638,7 +657,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
         print!("\x1B[A\x1B[K");
         stdout.flush().expect("Failed to flush stdout");
 
-        log::info!("Downloaded {} from {}", dest.display(), addr);
+        log::info!("Downloaded {} from {}", path, addr);
     }
 
     match socket.shutdown().await {
