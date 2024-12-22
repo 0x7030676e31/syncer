@@ -1,3 +1,4 @@
+use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -21,6 +22,118 @@ static CHUNK_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_CHUNK_SIZE as usize);
 static PREHASH: AtomicBool = AtomicBool::new(false);
 static PREHASH_THRESHOLD: AtomicU64 = AtomicU64::new(1024 * 1024 * 32);
 static CHECKSUM: AtomicBool = AtomicBool::new(false);
+
+static IS_DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
+
+// This struct is shitty af and there is for sure a better way to do this
+// but as of now it's 3AM and I'm too tired to think of a better way
+// so it's probably going to stay like this :((
+struct ProgressiveLine {
+    line: UnsafeCell<String>,
+    stdout: UnsafeCell<Option<io::Stdout>>,
+}
+
+impl ProgressiveLine {
+    pub const fn new() -> Self {
+        Self {
+            line: UnsafeCell::new(String::new()),
+            stdout: UnsafeCell::new(None),
+        }
+    }
+
+    pub fn init(&self) {
+        let stdout = io::stdout();
+        unsafe {
+            *self.stdout.get() = Some(stdout);
+        }
+    }
+
+    pub fn set(&self, line: String) {
+        unsafe {
+            if let Some(stdout) = &mut *self.stdout.get() {
+                let _ = write!(stdout, "\x1B[K{}\n", line);
+                let _ = stdout.flush();
+            }
+
+            *self.line.get() = line;
+        }
+    }
+
+    pub fn update(&self, line: String) {
+        unsafe {
+            if let Some(stdout) = &mut *self.stdout.get() {
+                let _ = write!(stdout, "\x1B[A\x1B[K{}\n", line);
+                let _ = stdout.flush();
+            }
+
+            *self.line.get() = line;
+        }
+    }
+
+    pub fn clear(&self) {
+        unsafe {
+            if let Some(stdout) = &mut *self.stdout.get() {
+                let _ = write!(stdout, "\x1B[A\x1B[K");
+                let _ = stdout.flush();
+            }
+        }
+    }
+
+    pub fn exec_and_print<F>(&self, f: F)
+    where
+        F: FnOnce() -> (),
+    {
+        unsafe {
+            if let Some(stdout) = &mut *self.stdout.get() {
+                let _ = write!(stdout, "\x1B[A\x1B[K");
+                let _ = stdout.flush();
+                f();
+
+                let _ = write!(stdout, "{}\n", *self.line.get());
+                let _ = stdout.flush();
+            }
+        }
+    }
+}
+
+unsafe impl Sync for ProgressiveLine {}
+unsafe impl Send for ProgressiveLine {}
+
+static PROGRESSIVE_LINE: ProgressiveLine = ProgressiveLine::new();
+
+mod progressive {
+    use super::*;
+
+    macro_rules! debug {
+        ($($arg:tt)*) => {
+            if IS_DEBUG_ENABLED.load(Ordering::Relaxed) {
+                PROGRESSIVE_LINE.exec_and_print(|| {
+                    log::debug!($($arg)*);
+                });
+            }
+        };
+    }
+
+    macro_rules! set {
+        ($($arg:tt)*) => {
+            PROGRESSIVE_LINE.set(format!($($arg)*));
+        };
+    }
+
+    macro_rules! update {
+        ($($arg:tt)*) => {
+            PROGRESSIVE_LINE.update(format!($($arg)*));
+        };
+    }
+
+    pub fn clear() {
+        PROGRESSIVE_LINE.clear();
+    }
+
+    pub(super) use debug;
+    pub(super) use set;
+    pub(super) use update;
+}
 
 fn prompt_mode() -> common::Mode {
     let mode = env::args().nth(1).unwrap_or_else(|| {
@@ -131,6 +244,9 @@ fn get_host() -> String {
 #[tokio::main]
 async fn main() {
     common::rust_log_init();
+
+    IS_DEBUG_ENABLED.store(log::log_enabled!(log::Level::Debug), Ordering::Relaxed);
+    PROGRESSIVE_LINE.init();
 
     let mode = prompt_mode();
     if mode.is_fetch() {
@@ -451,6 +567,15 @@ fn trim_root_and_format(mut path: String, os: u8) -> PathBuf {
     PathBuf::from(path.trim_start_matches(std::path::MAIN_SEPARATOR))
 }
 
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut hex = String::new();
+    for byte in bytes {
+        hex.push_str(&format!("{:02x}", byte));
+    }
+
+    hex
+}
+
 async fn prehash_check(
     socket: &mut TcpStream,
     path: &PathBuf,
@@ -458,7 +583,7 @@ async fn prehash_check(
     addr: SocketAddr,
 ) -> io::Result<bool> {
     let exists = fs::metadata(path).is_ok();
-    log::debug!(
+    progressive::debug!(
         "Sending exists ({} - {}) to {}",
         exists,
         if exists { 1 } else { 0 },
@@ -468,7 +593,7 @@ async fn prehash_check(
     socket.write_u8(if exists { 1 } else { 0 }).await?;
 
     if !exists {
-        log::debug!("File does not exist, skipping prehash check");
+        progressive::debug!("File does not exist, skipping prehash check");
         return Ok(false);
     }
 
@@ -483,7 +608,7 @@ async fn prehash_check(
     let metadata = file.metadata()?;
     let is_size_equal = metadata.len() == size;
 
-    log::debug!(
+    progressive::debug!(
         "Sending size equal ({} - {}) to {}",
         is_size_equal,
         if is_size_equal { 1 } else { 0 },
@@ -493,7 +618,7 @@ async fn prehash_check(
     socket.write_u8(if is_size_equal { 1 } else { 0 }).await?;
 
     if !is_size_equal {
-        log::debug!("File size does not match, skipping prehash check");
+        progressive::debug!("File size does not match, skipping prehash check");
         fs::remove_file(path)?;
         return Ok(false);
     }
@@ -510,7 +635,7 @@ async fn prehash_check(
         hasher.update(&buf[..read]);
     }
 
-    log::debug!("Reading client hash from {}", addr);
+    progressive::debug!("Reading client hash from {}", addr);
     let mut client_hash = [0; blake3::OUT_LEN];
     if let Err(err) = socket.read_exact(&mut client_hash).await {
         log::error!("Failed to read hash from {}: {}", addr, err);
@@ -518,10 +643,14 @@ async fn prehash_check(
     }
 
     let hash = *hasher.finalize().as_bytes();
-    log::debug!("Server hash: {:?}, Client hash: {:?}", hash, client_hash);
+    progressive::debug!(
+        "Server hash: {}, Client hash: {}",
+        bytes_to_hex(&hash),
+        bytes_to_hex(&client_hash)
+    );
 
     let hash_match = hash == client_hash;
-    log::debug!(
+    progressive::debug!(
         "Sending hash match ({} - {}) to {}",
         hash_match,
         if hash_match { 1 } else { 0 },
@@ -550,8 +679,6 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
     socket.write_u8(if prehash { 1 } else { 0 }).await?;
     socket.write_u64(prehash_threshold).await?;
     socket.write_u8(if do_checksum { 1 } else { 0 }).await?;
-
-    let mut stdout = io::stdout();
 
     log::debug!("Reading ack from {}", addr);
     let ack = match socket.read_u8().await {
@@ -584,6 +711,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             break;
         }
 
+        log::debug!("Size: {}", size);
         log::debug!("Reading path length from {}", addr);
         let path_len = match socket.read_u16().await {
             Ok(path_len) => path_len,
@@ -624,14 +752,10 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
         }
 
         if prehash && size >= prehash_threshold {
-            println!("Checking prehash for {}", path);
-            stdout.flush().expect("Failed to flush stdout");
-
+            progressive::set!("Checking prehash for {}", path);
             let prehash_result = prehash_check(&mut socket, &dest, size, addr).await?;
 
-            print!("\x1B[A\x1B[K");
-            stdout.flush().expect("Failed to flush stdout");
-
+            progressive::clear();
             if prehash_result {
                 log::info!("Prehash check passed for {}", path);
                 continue;
@@ -644,7 +768,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
         }
 
         let (f64_size, unit) = storage_unit(size);
-        println!("Downloading: 0B / {:.2}{} - {}", f64_size, unit, path);
+        progressive::set!("Downloading: 0B / {:.2}{} - {}", f64_size, unit, path);
 
         let mut file = match fs::File::create(&dest) {
             Ok(file) => file,
@@ -659,10 +783,10 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
 
         loop {
             let to_read = chunk_size.min((size - total_read) as usize);
-            log::debug!("Reading chunk ({} bytes) from {}", to_read, addr);
+            progressive::debug!("Reading chunk ({} bytes) from {}", to_read, addr);
 
             if to_read == 0 {
-                log::debug!("End of file reached (0 bytes to read) from {}", addr);
+                progressive::debug!("End of file reached (0 bytes to read) from {}", addr);
                 break;
             }
 
@@ -679,21 +803,25 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
                 return Err(err);
             }
 
-            log::debug!("Sending ack to {}", addr);
+            progressive::debug!("Sending ack to {}", addr);
             if let Err(err) = socket.write_u8(1).await {
                 log::error!("Failed to send ack to {}: {}", addr, err);
                 return Err(err);
             }
 
             let (f64_total_read, unit_total_read) = storage_unit(total_read);
-            println!(
-                "\x1B[A\x1B[KDownloading: {:.2}{} / {:.2}{} - {}",
-                f64_total_read, unit_total_read, f64_size, unit, path
+            progressive::update!(
+                "Downloading: {:.2}{} / {:.2}{} - {}",
+                f64_total_read,
+                unit_total_read,
+                f64_size,
+                unit,
+                path
             );
         }
 
         if let Some(hasher) = &mut hasher {
-            log::debug!("Reading client hash from {}", addr);
+            progressive::debug!("Reading client hash from {}", addr);
             let mut client_hash = [0; blake3::OUT_LEN];
             if let Err(err) = socket.read_exact(&mut client_hash).await {
                 log::error!("Failed to read hash from {}: {}", addr, err);
@@ -701,19 +829,21 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             }
 
             let hash = *hasher.finalize().as_bytes();
-            log::debug!("Server hash: {:?}, Client hash: {:?}", hash, client_hash);
+            progressive::debug!(
+                "Server hash: {}, Client hash: {}",
+                bytes_to_hex(&hash),
+                bytes_to_hex(&client_hash)
+            );
 
             if hash != client_hash {
                 log::error!("Hash mismatch for {}", dest.display());
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "hash mismatch"));
             }
 
-            log::info!("Hash match for {}", dest.display());
+            progressive::debug!("Hash match for {}", dest.display());
         }
 
-        print!("\x1B[A\x1B[K");
-        stdout.flush().expect("Failed to flush stdout");
-
+        progressive::clear();
         log::info!("Downloaded {} from {}", path, addr);
     }
 

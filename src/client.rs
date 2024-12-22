@@ -549,6 +549,11 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
             log::debug!("Sending file {} to {}", path.display(), addr);
             let size = metadata.len();
 
+            if size == 0 {
+                log::debug!("Skipping empty file {}", path.display());
+                continue;
+            }
+
             log::debug!("Sending size {} to {}", size, addr);
             socket.write_u64(size).await?;
 
