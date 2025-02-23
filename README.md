@@ -63,6 +63,17 @@ CHECKSUM=true ./server
 CHECKSUM=1 ./server
 ```
 
+Which hash algorithm to use:
+
+```bash
+# Default is blake3 (to use a different hash algorithm set `HASH_ALGO` to the desired algorithm)
+CHECKSUM_MODE=blake3 ./server
+CHECKSUM_MODE=crc32 ./server
+
+# This will disable the hash check as well as skip the file integrity check on pre-hash
+CHECKSUM_MODE=none ./server
+```
+
 With specified mode:
 
 ```bash

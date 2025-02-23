@@ -797,7 +797,10 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
 
         if fs::metadata(&dest).is_ok() {
             log::debug!("Removing existing file {}", dest.display());
-            fs::remove_file(&dest)?;
+            if let Err(err) = fs::remove_file(&dest) {
+                log::error!("Failed to remove existing file {}: {}", dest.display(), err);
+                return Err(err);
+            }
         }
 
         let (f64_size, unit) = storage_unit(size);
