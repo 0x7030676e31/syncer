@@ -608,8 +608,8 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
                 file.seek(io::SeekFrom::Start(0))?;
             }
 
-            let mut hasher =
-                (do_checksum || checksum_mode.is_none()).then(|| blake3::Hasher::new());
+            let doing_checksum = do_checksum && !checksum_mode.is_none();
+            let mut hasher = doing_checksum.then(|| common::Hasher::new(&checksum_mode));
             let mut total_read = 0;
 
             loop {
@@ -650,7 +650,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
             }
 
             if let Some(hasher) = hasher {
-                let hash = *hasher.finalize().as_bytes();
+                let hash = hasher.finalize();
 
                 log::debug!("Sending hash {:?} to {}", hash, addr);
                 socket.write_all(&hash).await?;

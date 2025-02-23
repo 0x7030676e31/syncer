@@ -814,8 +814,10 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             }
         };
 
-        let mut hasher =
-            (do_checksum || !checksum_mode.is_none()).then(|| common::Hasher::new(&checksum_mode));
+        let doing_checksum = do_checksum && !checksum_mode.is_none();
+        progressive::debug!("Doing checksum: {}", doing_checksum);
+
+        let mut hasher = doing_checksum.then(|| common::Hasher::new(&checksum_mode));
         let mut total_read = 0;
 
         loop {

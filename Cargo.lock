@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "syncer"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "blake3",
  "crc32fast",
