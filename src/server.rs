@@ -22,6 +22,7 @@ static CHUNK_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_CHUNK_SIZE as usize);
 static PREHASH: AtomicBool = AtomicBool::new(false);
 static PREHASH_THRESHOLD: AtomicU64 = AtomicU64::new(1024 * 1024 * 32);
 static CHECKSUM: AtomicBool = AtomicBool::new(false);
+static CHECKSUM_MODE: OnceLock<common::ChecksumMode> = OnceLock::new();
 
 static IS_DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -253,6 +254,28 @@ async fn main() {
         prompt_output_path();
     }
 
+    let checksum_mode = match env::var("CHECKSUM_MODE") {
+        Ok(checksum_mode) => match common::ChecksumMode::from_str(&checksum_mode) {
+            Ok(checksum_mode) => checksum_mode,
+            Err(()) => {
+                log::warn!(
+                    "Invalid CHECKSUM_MODE, using default ({})",
+                    common::ChecksumMode::default()
+                );
+                common::ChecksumMode::default()
+            }
+        },
+        Err(_) => {
+            log::debug!(
+                "CHECKSUM_MODE not set, using default ({})",
+                common::ChecksumMode::default()
+            );
+            common::ChecksumMode::default()
+        }
+    };
+
+    let _ = CHECKSUM_MODE.set(checksum_mode);
+
     if let Ok(chunk_size) = env::var("CHUNK_SIZE") {
         if let Ok(chunk_size) = chunk_size.parse::<u64>() {
             CHUNK_SIZE.store(chunk_size as usize, Ordering::Relaxed);
@@ -295,6 +318,7 @@ async fn main() {
         PREHASH_THRESHOLD.load(Ordering::Relaxed)
     );
     log::debug!("Checksum: {}", CHECKSUM.load(Ordering::Relaxed));
+    log::debug!("Checksum mode: {}", CHECKSUM_MODE.get().unwrap());
 
     log::info!(
         "Server started on {} in {} mode{}",
@@ -580,6 +604,7 @@ async fn prehash_check(
     socket: &mut TcpStream,
     path: &PathBuf,
     size: u64,
+    mode: &common::ChecksumMode,
     addr: SocketAddr,
 ) -> io::Result<bool> {
     let exists = fs::metadata(path).is_ok();
@@ -623,7 +648,12 @@ async fn prehash_check(
         return Ok(false);
     }
 
-    let mut hasher = blake3::Hasher::new();
+    if mode.is_none() {
+        progressive::debug!("No checksum mode set, skipping prehash check");
+        return Ok(true);
+    }
+
+    let mut hasher = common::Hasher::new(mode);
     let mut buf = vec![0; common::PREHASH_CHUNK_SIZE];
 
     loop {
@@ -636,13 +666,13 @@ async fn prehash_check(
     }
 
     progressive::debug!("Reading client hash from {}", addr);
-    let mut client_hash = [0; blake3::OUT_LEN];
+    let mut client_hash = vec![0; mode.hash_size()];
     if let Err(err) = socket.read_exact(&mut client_hash).await {
         log::error!("Failed to read hash from {}: {}", addr, err);
         return Err(err);
     }
 
-    let hash = *hasher.finalize().as_bytes();
+    let hash = hasher.finalize();
     progressive::debug!(
         "Server hash: {}, Client hash: {}",
         bytes_to_hex(&hash),
@@ -673,12 +703,14 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
     let prehash = PREHASH.load(Ordering::Relaxed);
     let prehash_threshold = PREHASH_THRESHOLD.load(Ordering::Relaxed);
     let do_checksum = CHECKSUM.load(Ordering::Relaxed);
+    let checksum_mode = CHECKSUM_MODE.get().unwrap();
 
     log::debug!("Sending config to {}", addr);
     socket.write_u64(chunk_size as u64).await?;
     socket.write_u8(if prehash { 1 } else { 0 }).await?;
     socket.write_u64(prehash_threshold).await?;
     socket.write_u8(if do_checksum { 1 } else { 0 }).await?;
+    socket.write_u8(checksum_mode.into()).await?;
 
     log::debug!("Reading ack from {}", addr);
     let ack = match socket.read_u8().await {
@@ -751,9 +783,10 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             return Err(err);
         }
 
-        if prehash && size >= prehash_threshold {
+        if prehash && size >= prehash_threshold || checksum_mode.is_none() {
             progressive::set!("Checking prehash for {}", path);
-            let prehash_result = prehash_check(&mut socket, &dest, size, addr).await?;
+            let prehash_result =
+                prehash_check(&mut socket, &dest, size, &checksum_mode, addr).await?;
 
             progressive::clear();
             if prehash_result {
@@ -778,7 +811,8 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             }
         };
 
-        let mut hasher = do_checksum.then(|| blake3::Hasher::new());
+        let mut hasher =
+            (do_checksum || !checksum_mode.is_none()).then(|| common::Hasher::new(&checksum_mode));
         let mut total_read = 0;
 
         loop {
@@ -820,15 +854,15 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             );
         }
 
-        if let Some(hasher) = &mut hasher {
+        if let Some(hasher) = hasher.take() {
             progressive::debug!("Reading client hash from {}", addr);
-            let mut client_hash = [0; blake3::OUT_LEN];
+            let mut client_hash = vec![0; checksum_mode.hash_size()];
             if let Err(err) = socket.read_exact(&mut client_hash).await {
                 log::error!("Failed to read hash from {}: {}", addr, err);
                 return Err(err);
             }
 
-            let hash = *hasher.finalize().as_bytes();
+            let hash = hasher.finalize();
             progressive::debug!(
                 "Server hash: {}, Client hash: {}",
                 bytes_to_hex(&hash),

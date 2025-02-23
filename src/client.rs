@@ -366,6 +366,7 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
 async fn prehash_check(
     socket: &mut TcpStream,
     file: &mut fs::File,
+    mode: &common::ChecksumMode,
     addr: SocketAddr,
 ) -> io::Result<bool> {
     log::debug!("Reading whether file exists from {}", addr);
@@ -396,8 +397,13 @@ async fn prehash_check(
         return Ok(false);
     }
 
+    if mode.is_none() {
+        log::debug!("No checksum mode, skipping hash check on {}", addr);
+        return Ok(true);
+    }
+
     let mut buffer = vec![0; common::PREHASH_CHUNK_SIZE];
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = common::Hasher::new(mode);
 
     loop {
         let read = file.read(&mut buffer)?;
@@ -408,7 +414,7 @@ async fn prehash_check(
         hasher.update(&buffer[..read]);
     }
 
-    let hash = *hasher.finalize().as_bytes();
+    let hash = hasher.finalize();
 
     log::debug!("Sending hash {:?} to {}", hash, addr);
     socket.write_all(&hash).await?;
@@ -470,7 +476,25 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
         }
     };
 
-    log::debug!("Checksum: {}; sending ack to {}", do_checksum, addr);
+    log::debug!(
+        "Checksum: {}; reading checksum mode from {}",
+        do_checksum,
+        addr
+    );
+    let checksum_mode = match socket.read_u8().await {
+        Ok(checksum_mode) => checksum_mode,
+        Err(err) => {
+            log::error!("Failed to read checksum mode from {}: {}", addr, err);
+            return Err(err);
+        }
+    };
+
+    let checksum_mode = common::ChecksumMode::try_from(checksum_mode).map_err(|err| {
+        log::error!("Failed to convert checksum mode: {}", err);
+        io::Error::from(io::ErrorKind::InvalidData)
+    })?;
+
+    log::debug!("Checksum mode: {}; sending ack to {}", checksum_mode, addr);
     socket.write_u8(1).await.inspect_err(|err| {
         log::error!("Failed to write ack to {}: {}", addr, err);
     })?;
@@ -574,8 +598,9 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
                 }
             };
 
-            if prehash && size >= prehash_threshold {
-                let hash_match = prehash_check(&mut socket, &mut file, addr).await?;
+            if prehash && size >= prehash_threshold || checksum_mode.is_none() {
+                let hash_match =
+                    prehash_check(&mut socket, &mut file, &checksum_mode, addr).await?;
                 if hash_match {
                     continue;
                 }
@@ -583,7 +608,8 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr) -> io::Resu
                 file.seek(io::SeekFrom::Start(0))?;
             }
 
-            let mut hasher = do_checksum.then(|| blake3::Hasher::new());
+            let mut hasher =
+                (do_checksum || checksum_mode.is_none()).then(|| blake3::Hasher::new());
             let mut total_read = 0;
 
             loop {

@@ -1,6 +1,6 @@
 [package]
 name = "syncer"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2024"
 default-run = "server"
 
@@ -14,6 +14,7 @@ path = "src/client.rs"
 
 [dependencies]
 blake3 = "1.5.5"
+crc32fast = "1.4.2"
 futures = "0.3.31"
 log = "0.4.22"
 netdev = "0.31.0"
