@@ -1,4 +1,5 @@
-use std::env;
+use std::io::Write;
+use std::{env, fmt};
 
 use tokio::time::Duration;
 
@@ -9,6 +10,43 @@ pub const VERIFY_MESSAGE_CLIENT: &str = "syncer-verify-client";
 pub const PREHASH_CHUNK_SIZE: usize = 1024 * 1024;
 pub const LINUX_ID: u8 = 0;
 pub const WINDOWS_ID: u8 = 1;
+
+#[cfg(unix)]
+pub fn get_terminal_size() -> Option<(usize, usize)> {
+    use libc::{TIOCGWINSZ, ioctl, winsize};
+    use std::os::unix::io::AsRawFd;
+
+    let fd = std::io::stdout().as_raw_fd();
+    let mut ws: winsize = unsafe { std::mem::zeroed() };
+
+    let result = unsafe { ioctl(fd, TIOCGWINSZ, &mut ws) };
+    if result == 0 {
+        Some((ws.ws_col as usize, ws.ws_row as usize))
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+pub fn get_terminal_size() -> Option<(usize, usize)> {
+    use std::ptr;
+    use winapi::um::processenv::GetStdHandle;
+    use winapi::um::winbase::STD_OUTPUT_HANDLE;
+    use winapi::um::wincon::{CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo};
+
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        let mut csbi: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+
+        if GetConsoleScreenBufferInfo(handle, &mut csbi) != 0 {
+            let cols = (csbi.srWindow.Right - csbi.srWindow.Left + 1) as usize;
+            let rows = (csbi.srWindow.Bottom - csbi.srWindow.Top + 1) as usize;
+            Some((cols, rows))
+        } else {
+            None
+        }
+    }
+}
 
 #[derive(Clone, Eq, PartialEq)]
 pub enum Mode {
@@ -194,6 +232,17 @@ impl Hasher {
     }
 }
 
+struct Padded<T> {
+    value: T,
+    width: usize,
+}
+
+impl<T: fmt::Display> fmt::Display for Padded<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{: <width$}", self.value, width = self.width)
+    }
+}
+
 pub fn rust_log_init() {
     if env::var("RUST_LOG").is_err() {
         unsafe {
@@ -201,5 +250,42 @@ pub fn rust_log_init() {
         }
     }
 
-    pretty_env_logger::init();
+    let mut builder = pretty_env_logger::formatted_builder();
+    let _ = builder
+        .parse_filters(&env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()))
+        .format(|buf, record| {
+            let target = record.target();
+            let max_width = target.len();
+
+            let style = buf.default_level_style(record.level());
+            let level = style.value(Padded {
+                value: record.level(),
+                width: 5,
+            });
+
+            let mut style = buf.style();
+            let target = style.set_bold(true).value(Padded {
+                value: target,
+                width: max_width,
+            });
+
+            let message = record.args().to_string();
+            let width = level.to_string().len() + target.to_string().len() + 4;
+            let message_width = message.len();
+            let total_width = width + message_width;
+
+            let terminal_width = match get_terminal_size() {
+                Some((width, _)) => width,
+                None => return Ok(()),
+            };
+
+            let message = if total_width > terminal_width {
+                message[..terminal_width - width - 3].to_string() + "..."
+            } else {
+                message
+            };
+
+            writeln!(buf, "{} {} > {}", level, target, message)
+        })
+        .try_init();
 }

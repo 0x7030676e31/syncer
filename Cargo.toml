@@ -1,6 +1,6 @@
 [package]
 name = "syncer"
-version = "1.7.1"
+version = "1.7.2"
 edition = "2024"
 default-run = "server"
 
@@ -27,3 +27,13 @@ tokio = { version = "1.42.0", features = [
     "io-util",
     "sync",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.171"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# use std::ptr;
+# use winapi::um::wincon::{GetConsoleScreenBufferInfo, CONSOLE_SCREEN_BUFFER_INFO};
+# use winapi::um::processenv::GetStdHandle;
+# use winapi::um::winbase::STD_OUTPUT_HANDLE;
+winapi = { version = "0.3.9", features = ["wincon", "processenv", "wincon"] }

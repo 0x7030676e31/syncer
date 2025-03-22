@@ -1,3 +1,5 @@
+#![feature(ptr_as_ref_unchecked)]
+
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -77,6 +79,8 @@ impl ProgressiveLine {
                 let _ = write!(stdout, "\x1B[A\x1B[K");
                 let _ = stdout.flush();
             }
+
+            *self.line.get() = String::new();
         }
     }
 
@@ -90,8 +94,10 @@ impl ProgressiveLine {
                 let _ = stdout.flush();
                 f();
 
-                let _ = write!(stdout, "{}\n", *self.line.get());
-                let _ = stdout.flush();
+                if !self.line.get().as_ref_unchecked().is_empty() {
+                    let _ = write!(stdout, "{}\n", *self.line.get());
+                    let _ = stdout.flush();
+                }
             }
         }
     }
@@ -105,6 +111,15 @@ static PROGRESSIVE_LINE: ProgressiveLine = ProgressiveLine::new();
 mod progressive {
     use super::*;
 
+    macro_rules! info {
+        ($($arg:tt)*) => {
+            println!("Info");
+            PROGRESSIVE_LINE.exec_and_print(|| {
+                log::info!($($arg)*);
+            });
+        };
+    }
+
     macro_rules! debug {
         ($($arg:tt)*) => {
             if IS_DEBUG_ENABLED.load(Ordering::Relaxed) {
@@ -112,6 +127,22 @@ mod progressive {
                     log::debug!($($arg)*);
                 });
             }
+        };
+    }
+
+    macro_rules! warn_ {
+        ($($arg:tt)*) => {
+            PROGRESSIVE_LINE.exec_and_print(|| {
+                log::warn!($($arg)*);
+            });
+        };
+    }
+
+    macro_rules! error {
+        ($($arg:tt)*) => {
+            PROGRESSIVE_LINE.exec_and_print(|| {
+                log::error!($($arg)*);
+            })
         };
     }
 
@@ -132,8 +163,11 @@ mod progressive {
     }
 
     pub(super) use debug;
+    pub(super) use error;
+    pub(super) use info;
     pub(super) use set;
     pub(super) use update;
+    pub(super) use warn_ as warn;
 }
 
 fn prompt_mode() -> common::Mode {
@@ -202,7 +236,7 @@ fn get_host() -> String {
     let host = match env::var("HOST") {
         Ok(host) => host,
         Err(_) => {
-            log::debug!("HOST not set, using");
+            progressive::debug!("HOST not set, using");
             String::from("0.0.0.0")
         }
     };
@@ -210,30 +244,30 @@ fn get_host() -> String {
     match SocketAddrV4::from_str(&host) {
         Ok(_) => return host,
         Err(_) => {
-            log::debug!("Provided HOST is not a valid SocketAddrV4, trying with Ipv4Addr");
+            progressive::debug!("Provided HOST is not a valid SocketAddrV4, trying with Ipv4Addr");
         }
     };
 
     if let Err(err) = host.parse::<Ipv4Addr>() {
-        log::error!("Invalid HOST: {}", err);
+        progressive::error!("Invalid HOST: {}", err);
         process::exit(1);
     }
 
     let port = match env::var("PORT") {
         Ok(port) => port,
         Err(_) => {
-            log::debug!("PORT not set, using {}", common::DEFAULT_PORT);
+            progressive::debug!("PORT not set, using {}", common::DEFAULT_PORT);
             common::DEFAULT_PORT.to_string()
         }
     };
 
     match port.parse::<u16>() {
         Ok(_) => {
-            log::debug!("PORT set to {}", port);
+            progressive::debug!("PORT set to {}", port);
             format!("{}:{}", host, port)
         }
         Err(_) => {
-            log::warn!(
+            progressive::warn!(
                 "Invalid port, falling back to default ({})",
                 common::DEFAULT_PORT
             );
@@ -258,7 +292,7 @@ async fn main() {
         Ok(checksum_mode) => match common::ChecksumMode::from_str(&checksum_mode) {
             Ok(checksum_mode) => checksum_mode,
             Err(()) => {
-                log::warn!(
+                progressive::warn!(
                     "Invalid CHECKSUM_MODE, using default ({})",
                     common::ChecksumMode::default()
                 );
@@ -266,7 +300,7 @@ async fn main() {
             }
         },
         Err(_) => {
-            log::debug!(
+            progressive::debug!(
                 "CHECKSUM_MODE not set, using default ({})",
                 common::ChecksumMode::default()
             );
@@ -280,7 +314,7 @@ async fn main() {
         if let Ok(chunk_size) = chunk_size.parse::<u64>() {
             CHUNK_SIZE.store(chunk_size as usize, Ordering::Relaxed);
         } else {
-            log::warn!("Invalid CHUNK_SIZE, using default ({})", DEFAULT_CHUNK_SIZE);
+            progressive::warn!("Invalid CHUNK_SIZE, using default ({})", DEFAULT_CHUNK_SIZE);
         }
     }
 
@@ -292,7 +326,7 @@ async fn main() {
         if let Ok(prehash_threshold) = prehash_threshold.parse::<u64>() {
             PREHASH_THRESHOLD.store(prehash_threshold, Ordering::Relaxed);
         } else {
-            log::warn!(
+            progressive::warn!(
                 "Invalid PREHASH_THRESHOLD, using default ({})",
                 PREHASH_THRESHOLD.load(Ordering::Relaxed)
             );
@@ -306,21 +340,21 @@ async fn main() {
     let listener = match TcpListener::bind(&addr).await {
         Ok(listener) => listener,
         Err(err) => {
-            log::error!("Failed to bind to {}: {}", addr, err);
+            progressive::error!("Failed to bind to {}: {}", addr, err);
             process::exit(1);
         }
     };
 
-    log::debug!("Chunk size: {}", CHUNK_SIZE.load(Ordering::Relaxed));
-    log::debug!("Prehash: {}", PREHASH.load(Ordering::Relaxed));
-    log::debug!(
+    progressive::debug!("Chunk size: {}", CHUNK_SIZE.load(Ordering::Relaxed));
+    progressive::debug!("Prehash: {}", PREHASH.load(Ordering::Relaxed));
+    progressive::debug!(
         "Prehash threshold: {}",
         PREHASH_THRESHOLD.load(Ordering::Relaxed)
     );
-    log::debug!("Checksum: {}", CHECKSUM.load(Ordering::Relaxed));
-    log::debug!("Checksum mode: {}", CHECKSUM_MODE.get().unwrap());
+    progressive::debug!("Checksum: {}", CHECKSUM.load(Ordering::Relaxed));
+    progressive::debug!("Checksum mode: {}", CHECKSUM_MODE.get().unwrap());
 
-    log::info!(
+    progressive::info!(
         "Server started on {} in {} mode{}",
         addr,
         mode,
@@ -334,19 +368,19 @@ async fn main() {
     loop {
         let (socket, addr) = match listener.accept().await {
             Ok((socket, addr)) => {
-                log::debug!("Accepted connection from {}", addr);
+                progressive::debug!("Accepted connection from {}", addr);
                 (socket, addr)
             }
             Err(err) => {
-                log::error!("Failed to accept connection: {}", err);
+                progressive::error!("Failed to accept connection: {}", err);
                 continue;
             }
         };
 
         tokio::spawn(async move {
             match handle_connection(socket, addr).await {
-                Ok(_) => log::debug!("Connection with {} closed", addr),
-                Err(_) => log::error!("Connection with {} unexpectedly closed", addr),
+                Ok(_) => progressive::debug!("Connection with {} closed", addr),
+                Err(_) => progressive::error!("Connection with {} unexpectedly closed", addr),
             };
         });
     }
@@ -360,11 +394,11 @@ async fn handle_connection(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
     let mut buf = [0; common::VERIFY_MESSAGE_CLIENT.len()];
     match time::timeout(common::CONNECTION_TIMEOUT, socket.read_exact(&mut buf)).await {
         Ok(Err(err)) => {
-            log::error!("Failed to read verification message from {}: {}", addr, err);
+            progressive::error!("Failed to read verification message from {}: {}", addr, err);
             return Err(err);
         }
         Err(_) => {
-            log::error!("Connection with {} timed out", addr);
+            progressive::error!("Connection with {} timed out", addr);
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "connection timed out",
@@ -374,26 +408,26 @@ async fn handle_connection(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
     };
 
     if buf != common::VERIFY_MESSAGE_CLIENT.as_bytes() {
-        log::error!("Invalid verification message from {}", addr);
+        progressive::error!("Invalid verification message from {}", addr);
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid data"));
     }
 
     let mode = SERVER_MODE.get().expect("mode not set");
     if let Err(err) = socket.write_u8(mode.into()).await {
-        log::error!("Failed to send mode to {}: {}", addr, err);
+        progressive::error!("Failed to send mode to {}: {}", addr, err);
         return Err(err);
     }
 
     let os = match socket.read_u8().await {
         Ok(os) => os,
         Err(err) => {
-            log::error!("Failed to read OS from {}: {}", addr, err);
+            progressive::error!("Failed to read OS from {}: {}", addr, err);
             return Err(err);
         }
     };
 
     if os != common::LINUX_ID && os != common::WINDOWS_ID {
-        log::error!("Invalid OS from {}", addr);
+        progressive::error!("Invalid OS from {}", addr);
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid data"));
     }
 
@@ -404,17 +438,17 @@ async fn handle_connection(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
     let ack = match socket.read_u8().await {
         Ok(ack) => ack,
         Err(err) => {
-            log::error!("Failed to read ack from {}: {}", addr, err);
+            progressive::error!("Failed to read ack from {}: {}", addr, err);
             return Err(err);
         }
     };
 
     if ack != 1 {
-        log::error!("Invalid ack from {}", addr);
+        progressive::error!("Invalid ack from {}", addr);
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid data"));
     }
 
-    log::info!(
+    progressive::info!(
         "Verified connection with {} as {}",
         addr,
         if os == 0 { "Windows" } else { "Linux" }
@@ -431,30 +465,30 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
     let mut ext_buf = [0; u8::MAX as usize];
 
     loop {
-        log::debug!("Reading extension length from {}", addr);
+        progressive::debug!("Reading extension length from {}", addr);
         let ext_length = match socket.read_u8().await {
             Ok(ext_length) => ext_length,
             Err(err) => {
-                log::error!("Failed to read extension length from {}: {}", addr, err);
+                progressive::error!("Failed to read extension length from {}: {}", addr, err);
                 return Err(err);
             }
         };
 
         if ext_length == 0 {
-            log::debug!("Received end of scan from {}", addr);
+            progressive::debug!("Received end of scan from {}", addr);
             break;
         }
 
-        log::debug!("Reading extension ({} bytes) from {}", ext_length, addr);
+        progressive::debug!("Reading extension ({} bytes) from {}", ext_length, addr);
         if let Err(err) = socket.read_exact(&mut ext_buf[..ext_length as usize]).await {
-            log::error!("Failed to read extension from {}: {}", addr, err);
+            progressive::error!("Failed to read extension from {}: {}", addr, err);
             return Err(err);
         }
 
         let ext = match String::from_utf8(ext_buf[..ext_length as usize].to_vec()) {
             Ok(ext) => ext,
             Err(err) => {
-                log::error!("Failed to parse extension from {}: {}", addr, err);
+                progressive::error!("Failed to parse extension from {}: {}", addr, err);
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("Invalid extension: {}", err),
@@ -462,20 +496,20 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
             }
         };
 
-        log::debug!("Reading count from {}", addr);
+        progressive::debug!("Reading count from {}", addr);
         let count = match socket.read_u64().await {
             Ok(count) => count,
             Err(err) => {
-                log::error!("Failed to read count from {}: {}", addr, err);
+                progressive::error!("Failed to read count from {}: {}", addr, err);
                 return Err(err);
             }
         };
 
-        log::debug!("Reading size from {}", addr);
+        progressive::debug!("Reading size from {}", addr);
         let size = match socket.read_u64().await {
             Ok(size) => size,
             Err(err) => {
-                log::error!("Failed to read size from {}: {}", addr, err);
+                progressive::error!("Failed to read size from {}: {}", addr, err);
                 return Err(err);
             }
         };
@@ -485,7 +519,7 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
         entry.1 += size;
     }
 
-    log::info!("Scan completed for {}", addr);
+    progressive::info!("Scan completed for {}", addr);
 
     let padding = extensions
         .iter()
@@ -564,11 +598,11 @@ async fn handle_mode0_scan(mut socket: TcpStream, addr: SocketAddr) -> io::Resul
     println!();
     match socket.shutdown().await {
         Ok(_) => {
-            log::debug!("Connection with {} shutdown", addr);
+            progressive::debug!("Connection with {} shutdown", addr);
             Ok(())
         }
         Err(err) => {
-            log::error!("Failed to shutdown connection with {}: {}", addr, err);
+            progressive::error!("Failed to shutdown connection with {}: {}", addr, err);
             Err(err)
         }
     }
@@ -625,7 +659,7 @@ async fn prehash_check(
     let mut file = match fs::File::open(path) {
         Ok(file) => file,
         Err(err) => {
-            log::error!("Failed to open file {}: {}", path.display(), err);
+            progressive::error!("Failed to open file {}: {}", path.display(), err);
             return Err(err);
         }
     };
@@ -668,7 +702,7 @@ async fn prehash_check(
     progressive::debug!("Reading client hash from {}", addr);
     let mut client_hash = vec![0; mode.hash_size()];
     if let Err(err) = socket.read_exact(&mut client_hash).await {
-        log::error!("Failed to read hash from {}: {}", addr, err);
+        progressive::error!("Failed to read hash from {}: {}", addr, err);
         return Err(err);
     }
 
@@ -691,7 +725,7 @@ async fn prehash_check(
     drop(file);
 
     if !hash_match {
-        log::error!("Hash mismatch for {}", path.display());
+        progressive::error!("Hash mismatch for {}", path.display());
         fs::remove_file(path)?;
     }
 
@@ -705,65 +739,65 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
     let do_checksum = CHECKSUM.load(Ordering::Relaxed);
     let checksum_mode = CHECKSUM_MODE.get().unwrap();
 
-    log::debug!("Sending config to {}", addr);
+    progressive::debug!("Sending config to {}", addr);
     socket.write_u64(chunk_size as u64).await?;
     socket.write_u8(if prehash { 1 } else { 0 }).await?;
     socket.write_u64(prehash_threshold).await?;
     socket.write_u8(if do_checksum { 1 } else { 0 }).await?;
     socket.write_u8(checksum_mode.into()).await?;
 
-    log::debug!("Reading ack from {}", addr);
+    progressive::debug!("Reading ack from {}", addr);
     let ack = match socket.read_u8().await {
         Ok(ack) => ack,
         Err(err) => {
-            log::error!("Failed to read ack from {}: {}", addr, err);
+            progressive::error!("Failed to read ack from {}: {}", addr, err);
             return Err(err);
         }
     };
 
     if ack != 1 {
-        log::error!("Invalid ack from {}", addr);
+        progressive::error!("Invalid ack from {}", addr);
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid data"));
     }
 
     let mut buf = vec![0; chunk_size];
 
     loop {
-        log::debug!("Reading size from {}", addr);
+        progressive::debug!("Reading size from {}", addr);
         let size = match socket.read_u64().await {
             Ok(size) => size,
             Err(err) => {
-                log::error!("Failed to read size from {}: {}", addr, err);
+                progressive::error!("Failed to read size from {}: {}", addr, err);
                 return Err(err);
             }
         };
 
         if size == 0 {
-            log::debug!("Received end of fetch from {}", addr);
+            progressive::debug!("Received end of fetch from {}", addr);
             break;
         }
 
-        log::debug!("Size: {}", size);
-        log::debug!("Reading path length from {}", addr);
+        progressive::debug!("Size: {}", size);
+        progressive::debug!("Reading path length from {}", addr);
         let path_len = match socket.read_u16().await {
             Ok(path_len) => path_len,
             Err(err) => {
-                log::error!("Failed to read path length from {}: {}", addr, err);
+                progressive::error!("Failed to read path length from {}: {}", addr, err);
                 return Err(err);
             }
         };
 
-        log::debug!("Reading path ({} bytes) from {}", path_len, addr);
+        progressive::debug!("Reading path ({} bytes) from {}", path_len, addr);
         let mut path_buf = vec![0; path_len as usize];
         if let Err(err) = socket.read_exact(&mut path_buf).await {
-            log::error!("Failed to read path from {}: {}", addr, err);
+            progressive::error!("Failed to read path from {}: {}", addr, err);
             return Err(err);
         }
 
         let path = match String::from_utf8(path_buf) {
             Ok(path) => path,
             Err(err) => {
-                log::error!("Failed to parse path from {}: {}", addr, err);
+                progressive::error!("Failed to parse path from {}: {}", addr, err);
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("Invalid path: {}", err),
@@ -771,15 +805,15 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             }
         };
 
-        log::debug!("Path: {}", path);
+        progressive::debug!("Path: {}", path);
         let dest = TARGET_DIR
             .get()
             .unwrap()
             .join(trim_root_and_format(path.clone(), os));
 
-        log::debug!("Creating directory for {}", dest.display());
+        progressive::debug!("Creating directory for {}", dest.display());
         if let Err(err) = fs::create_dir_all(dest.parent().unwrap()) {
-            log::error!("Failed to create directory for {}: {}", dest.display(), err);
+            progressive::error!("Failed to create directory for {}: {}", dest.display(), err);
             return Err(err);
         }
 
@@ -790,15 +824,15 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
 
             progressive::clear();
             if prehash_result {
-                log::info!("Prehash check passed for {}", path);
+                progressive::info!("Prehash check passed for {}", path);
                 continue;
             }
         }
 
         if fs::metadata(&dest).is_ok() {
-            log::debug!("Removing existing file {}", dest.display());
+            progressive::debug!("Removing existing file {}", dest.display());
             if let Err(err) = fs::remove_file(&dest) {
-                log::error!("Failed to remove existing file {}: {}", dest.display(), err);
+                progressive::error!("Failed to remove existing file {}: {}", dest.display(), err);
                 return Err(err);
             }
         }
@@ -809,7 +843,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
         let mut file = match fs::File::create(&dest) {
             Ok(file) => file,
             Err(err) => {
-                log::error!("Failed to create file {}: {}", dest.display(), err);
+                progressive::error!("Failed to create file {}: {}", dest.display(), err);
                 return Err(err);
             }
         };
@@ -830,7 +864,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             }
 
             if let Err(err) = socket.read_exact(&mut buf[..to_read]).await {
-                log::error!("Failed to read chunk from {}: {}", addr, err);
+                progressive::error!("Failed to read chunk from {}: {}", addr, err);
                 return Err(err);
             }
 
@@ -838,13 +872,13 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             hasher.as_mut().map(|hasher| hasher.update(&buf[..to_read]));
 
             if let Err(err) = file.write_all(&buf[..to_read]) {
-                log::error!("Failed to write chunk to {}: {}", dest.display(), err);
+                progressive::error!("Failed to write chunk to {}: {}", dest.display(), err);
                 return Err(err);
             }
 
             progressive::debug!("Sending ack to {}", addr);
             if let Err(err) = socket.write_u8(1).await {
-                log::error!("Failed to send ack to {}: {}", addr, err);
+                progressive::error!("Failed to send ack to {}: {}", addr, err);
                 return Err(err);
             }
 
@@ -863,7 +897,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             progressive::debug!("Reading client hash from {}", addr);
             let mut client_hash = vec![0; checksum_mode.hash_size()];
             if let Err(err) = socket.read_exact(&mut client_hash).await {
-                log::error!("Failed to read hash from {}: {}", addr, err);
+                progressive::error!("Failed to read hash from {}: {}", addr, err);
                 return Err(err);
             }
 
@@ -875,7 +909,7 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
             );
 
             if hash != client_hash {
-                log::error!("Hash mismatch for {}", dest.display());
+                progressive::error!("Hash mismatch for {}", dest.display());
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "hash mismatch"));
             }
 
@@ -883,16 +917,16 @@ async fn handle_mode1_fetch(mut socket: TcpStream, addr: SocketAddr, os: u8) -> 
         }
 
         progressive::clear();
-        log::info!("Downloaded {} from {}", path, addr);
+        progressive::info!("Downloaded {} from {}", path, addr);
     }
 
     match socket.shutdown().await {
         Ok(_) => {
-            log::debug!("Connection with {} shutdown", addr);
+            progressive::debug!("Connection with {} shutdown", addr);
             Ok(())
         }
         Err(err) => {
-            log::error!("Failed to shutdown connection with {}: {}", addr, err);
+            progressive::error!("Failed to shutdown connection with {}: {}", addr, err);
             Err(err)
         }
     }

@@ -298,9 +298,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.168"
+version = "0.2.171"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5aaeb2981e0606ca11d79718f8bb01164f1d6ed75080182d3abf017e6d244b6d"
+checksum = "c19937216e9d3aa9956d9bb8dfc0b0c8beb6058fc4f7a4dc4d850edf86a237d6"
 
 [[package]]
 name = "log"
@@ -533,15 +533,17 @@ dependencies = [
 
 [[package]]
 name = "syncer"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "blake3",
  "crc32fast",
  "futures",
+ "libc",
  "log",
  "netdev",
  "pretty_env_logger",
  "tokio",
+ "winapi",
 ]
 
 [[package]]
